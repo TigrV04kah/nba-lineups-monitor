@@ -15,6 +15,7 @@ from nba_lineups_scraper import (
     get_team_last_game_starters_nba_api, get_multiple_teams_last_starters,
     get_team_last_n_games_stats
 )
+from ai_analyzer import analyze_lineup_changes, init_openai
 
 # Файл для хранения составов
 LINEUPS_CACHE_FILE = "d:/scripts/nba_lineups/lineups_cache.json"
@@ -90,6 +91,14 @@ class LineupsGUI:
         self.historical_cache = {}  # Кэш исторических данных (последние игры команд)
         self.team_stats_cache = {}  # Кэш статистики последних 3 игр команд
         self.cache_is_stale = False  # Флаг устаревшего кэша
+        self.ai_enabled = False  # AI анализ
+
+        # Инициализируем AI
+        self.ai_enabled = init_openai()
+        if self.ai_enabled:
+            print("AI анализатор инициализирован")
+        else:
+            print("AI анализатор недоступен - проверьте .env файл")
 
         # Загружаем кэши если есть
         self.load_cache()
@@ -142,6 +151,15 @@ class LineupsGUI:
                                      font=('Arial', 10, 'bold'),
                                      relief='flat', padx=10, pady=5)
         self.compare_btn.pack(side='right', padx=5, pady=15)
+
+        # Кнопка AI анализа
+        ai_btn_color = '#9b59b6' if self.ai_enabled else '#555555'
+        self.ai_btn = tk.Button(header_frame, text="AI Analysis",
+                                command=self.show_ai_analysis_selection,
+                                bg=ai_btn_color, fg='white',
+                                font=('Arial', 10, 'bold'),
+                                relief='flat', padx=10, pady=5)
+        self.ai_btn.pack(side='right', padx=5, pady=15)
 
         # Кнопка тестового изменения (для отладки)
         self.test_btn = tk.Button(header_frame, text="Test Change",
@@ -617,6 +635,9 @@ class LineupsGUI:
 
             # Обновляем UI - подсвечиваем изменения
             self.highlight_changes(changes)
+
+            # Запускаем AI анализ при изменениях
+            self.auto_ai_analysis_on_change(changes)
 
         # Обновляем кэш
         self.previous_lineups = current_lineups
@@ -1309,6 +1330,242 @@ class LineupsGUI:
                              font=('Arial', 11, 'bold'),
                              relief='flat', padx=30, pady=8)
         close_btn.pack(pady=15)
+
+    def show_ai_analysis_selection(self):
+        """Показ окна выбора команды для AI анализа."""
+        if not self.ai_enabled:
+            messagebox.showwarning("AI недоступен",
+                                   "AI анализ недоступен.\n\nСоздайте файл .env с вашим OpenAI API ключом:\nOPENAI_API_KEY=sk-...")
+            return
+
+        if not self.games:
+            messagebox.showwarning("Нет данных", "Сначала загрузите данные об играх!")
+            return
+
+        # Создаём окно выбора команды
+        select_window = tk.Toplevel(self.root)
+        select_window.title("AI Analysis - Select Team")
+        select_window.geometry("400x500")
+        select_window.configure(bg='#1a1a2e')
+
+        # Заголовок
+        header = tk.Label(select_window, text="Select Team for AI Analysis",
+                         font=('Arial', 14, 'bold'), fg='#9b59b6', bg='#1a1a2e')
+        header.pack(pady=15)
+
+        desc = tk.Label(select_window,
+                       text="AI проанализирует изменения в составе\nи их влияние на статистику игроков",
+                       font=('Arial', 10), fg='#a0a0a0', bg='#1a1a2e')
+        desc.pack(pady=5)
+
+        # Список команд
+        teams_frame = tk.Frame(select_window, bg='#1a1a2e')
+        teams_frame.pack(fill='both', expand=True, padx=20, pady=10)
+
+        for game in self.games:
+            game_frame = tk.Frame(teams_frame, bg='#16213e')
+            game_frame.pack(fill='x', pady=5)
+
+            game_time = game.get('game_time', 'TBD')
+            time_lbl = tk.Label(game_frame, text=game_time,
+                               font=('Arial', 9), fg='#a0a0a0', bg='#16213e')
+            time_lbl.pack(pady=5)
+
+            btn_frame = tk.Frame(game_frame, bg='#16213e')
+            btn_frame.pack(fill='x', padx=10, pady=5)
+
+            # Away team
+            away = game.get('away_team', {})
+            away_abbrev = away.get('abbrev', '???')
+            away_colors = TEAM_COLORS.get(away_abbrev, {'primary': '#333333'})
+
+            away_btn = tk.Button(btn_frame, text=away_abbrev,
+                                command=lambda a=away_abbrev, w=select_window: self.run_ai_analysis(a, w),
+                                bg=away_colors['primary'], fg='white',
+                                font=('Arial', 12, 'bold'),
+                                relief='flat', padx=20, pady=8)
+            away_btn.pack(side='left', padx=10)
+
+            vs_lbl = tk.Label(btn_frame, text="@",
+                             font=('Arial', 14, 'bold'), fg='#e94560', bg='#16213e')
+            vs_lbl.pack(side='left', padx=10)
+
+            # Home team
+            home = game.get('home_team', {})
+            home_abbrev = home.get('abbrev', '???')
+            home_colors = TEAM_COLORS.get(home_abbrev, {'primary': '#333333'})
+
+            home_btn = tk.Button(btn_frame, text=home_abbrev,
+                                command=lambda h=home_abbrev, w=select_window: self.run_ai_analysis(h, w),
+                                bg=home_colors['primary'], fg='white',
+                                font=('Arial', 12, 'bold'),
+                                relief='flat', padx=20, pady=8)
+            home_btn.pack(side='left', padx=10)
+
+    def run_ai_analysis(self, team_abbrev, parent_window):
+        """Запуск AI анализа для выбранной команды."""
+        parent_window.destroy()
+
+        self.status_label.config(text=f"AI analyzing {team_abbrev}...", fg='#9b59b6')
+
+        # Запускаем в фоне
+        thread = threading.Thread(
+            target=self._run_ai_analysis_thread,
+            args=(team_abbrev,),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_ai_analysis_thread(self, team_abbrev):
+        """Фоновый AI анализ."""
+        try:
+            # Получаем данные о прошлой игре
+            historical = self.historical_cache.get(team_abbrev)
+            if not historical:
+                # Загружаем если нет в кэше
+                historical = get_team_last_game_starters_nba_api(team_abbrev, '2025-26')
+                if historical:
+                    historical['cached_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self.historical_cache[team_abbrev] = historical
+
+            # Получаем текущий состав
+            current_starters = set()
+            for game in self.games:
+                for team_type in ['away_team', 'home_team']:
+                    team_data = game.get(team_type, {})
+                    if team_data.get('abbrev') == team_abbrev:
+                        lineup = team_data.get('lineup', [])
+                        for player in lineup:
+                            if player.get('position') in POSITIONS_ORDER and player.get('status', 'active') != 'out':
+                                current_starters.add(player.get('name'))
+                        break
+
+            # Сравниваем составы
+            past_starters = set(historical.get('starters_names', [])) if historical else set()
+
+            changes = {
+                'new_players': list(current_starters - past_starters),
+                'removed_players': list(past_starters - current_starters)
+            }
+
+            # Получаем статистику команды
+            team_stats = self.team_stats_cache.get(team_abbrev)
+
+            # Запускаем AI анализ
+            analysis = analyze_lineup_changes(team_abbrev, changes, team_stats)
+
+            # Показываем результат
+            self.root.after(0, lambda: self._show_ai_analysis_popup(team_abbrev, changes, analysis, historical))
+
+        except Exception as e:
+            print(f"Ошибка AI анализа: {e}")
+            self.root.after(0, lambda: self.status_label.config(
+                text=f"AI Error: {e}", fg='#ff6b6b'
+            ))
+
+        self.root.after(0, lambda: self.status_label.config(
+            text=f"{len(self.games)} games today", fg='#a0a0a0'
+        ))
+
+    def _show_ai_analysis_popup(self, team_abbrev, changes, analysis, historical):
+        """Показ popup окна с AI анализом."""
+        colors = TEAM_COLORS.get(team_abbrev, {'primary': '#333333', 'secondary': '#666666'})
+
+        popup = tk.Toplevel(self.root)
+        popup.title(f"AI Analysis - {team_abbrev}")
+        popup.geometry("600x550")
+        popup.configure(bg='#1a1a2e')
+
+        # Заголовок
+        header_frame = tk.Frame(popup, bg=colors['primary'])
+        header_frame.pack(fill='x')
+
+        header = tk.Label(header_frame, text=f"{team_abbrev} - AI Analysis",
+                         font=('Arial', 16, 'bold'), fg='white', bg=colors['primary'])
+        header.pack(pady=15)
+
+        # Информация об изменениях
+        changes_frame = tk.Frame(popup, bg='#16213e')
+        changes_frame.pack(fill='x', padx=15, pady=10)
+
+        if historical:
+            last_game = tk.Label(changes_frame,
+                                text=f"Last game: {historical.get('matchup', 'N/A')} ({historical.get('date', 'N/A')})",
+                                font=('Arial', 10), fg='#a0a0a0', bg='#16213e')
+            last_game.pack(anchor='w', padx=10, pady=5)
+
+        new_players = changes.get('new_players', [])
+        removed_players = changes.get('removed_players', [])
+
+        if new_players:
+            new_lbl = tk.Label(changes_frame,
+                              text=f"+ NEW in starting: {', '.join(new_players)}",
+                              font=('Arial', 11, 'bold'), fg='#6bcb77', bg='#16213e')
+            new_lbl.pack(anchor='w', padx=10, pady=2)
+
+        if removed_players:
+            removed_lbl = tk.Label(changes_frame,
+                                  text=f"- OUT from starting: {', '.join(removed_players)}",
+                                  font=('Arial', 11, 'bold'), fg='#ff6b6b', bg='#16213e')
+            removed_lbl.pack(anchor='w', padx=10, pady=2)
+
+        if not new_players and not removed_players:
+            no_changes = tk.Label(changes_frame,
+                                 text="No lineup changes detected",
+                                 font=('Arial', 11), fg='#ffd93d', bg='#16213e')
+            no_changes.pack(anchor='w', padx=10, pady=5)
+
+        # AI анализ
+        analysis_frame = tk.Frame(popup, bg='#1a1a2e')
+        analysis_frame.pack(fill='both', expand=True, padx=15, pady=10)
+
+        analysis_header = tk.Label(analysis_frame, text="AI Analysis",
+                                  font=('Arial', 12, 'bold'), fg='#9b59b6', bg='#1a1a2e')
+        analysis_header.pack(anchor='w', pady=5)
+
+        # Текстовое поле с анализом
+        text_frame = tk.Frame(analysis_frame, bg='#16213e')
+        text_frame.pack(fill='both', expand=True)
+
+        scrollbar = ttk.Scrollbar(text_frame)
+        scrollbar.pack(side='right', fill='y')
+
+        analysis_text = tk.Text(text_frame, bg='#16213e', fg='white',
+                               font=('Arial', 11), wrap='word',
+                               yscrollcommand=scrollbar.set,
+                               padx=10, pady=10)
+        analysis_text.pack(fill='both', expand=True)
+        scrollbar.config(command=analysis_text.yview)
+
+        analysis_text.insert('end', analysis)
+        analysis_text.config(state='disabled')
+
+        # Кнопка закрытия
+        close_btn = tk.Button(popup, text="Close",
+                             command=popup.destroy,
+                             bg=colors['primary'], fg='white',
+                             font=('Arial', 11, 'bold'),
+                             relief='flat', padx=30, pady=8)
+        close_btn.pack(pady=15)
+
+    def auto_ai_analysis_on_change(self, changes):
+        """Автоматический AI анализ при обнаружении изменений в составе."""
+        if not self.ai_enabled:
+            return
+
+        # Группируем изменения по командам
+        teams_changed = set()
+        for change in changes:
+            teams_changed.add(change['team'])
+
+        # Запускаем анализ для каждой команды с изменениями
+        for team_abbrev in teams_changed:
+            thread = threading.Thread(
+                target=self._run_ai_analysis_thread,
+                args=(team_abbrev,),
+                daemon=True
+            )
+            thread.start()
 
 
 def main():

@@ -25,3 +25,8 @@ build/
 .env
 .venv/
 venv/
+
+# API keys (never commit!)
+openaikey.txt
+*key*.txt
+*_key.txt
