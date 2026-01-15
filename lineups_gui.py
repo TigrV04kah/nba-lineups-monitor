@@ -17,6 +17,46 @@ from nba_lineups_scraper import (
 )
 from ai_analyzer import analyze_lineup_changes, init_openai
 
+def get_last_name(full_name):
+    """Извлечение фамилии из полного имени для сравнения."""
+    if not full_name:
+        return ""
+    # Убираем суффиксы типа Jr., III, II
+    name = full_name.replace(" Jr.", "").replace(" III", "").replace(" II", "").strip()
+    parts = name.split()
+    if len(parts) >= 2:
+        # Берём последнюю часть как фамилию
+        return parts[-1].lower()
+    return name.lower()
+
+def normalize_name(name):
+    """Нормализация имени для сравнения (D. Booker -> booker)."""
+    if not name:
+        return ""
+    return get_last_name(name)
+
+def match_players_by_lastname(current_names, past_names):
+    """
+    Сравнение списков игроков по фамилиям.
+    Возвращает (new_players, removed_players) с оригинальными именами.
+    """
+    # Создаём словари: фамилия -> оригинальное имя
+    current_by_lastname = {normalize_name(n): n for n in current_names}
+    past_by_lastname = {normalize_name(n): n for n in past_names}
+
+    current_lastnames = set(current_by_lastname.keys())
+    past_lastnames = set(past_by_lastname.keys())
+
+    # Новые игроки (есть сейчас, не было раньше)
+    new_lastnames = current_lastnames - past_lastnames
+    new_players = [current_by_lastname[ln] for ln in new_lastnames]
+
+    # Выбывшие игроки (были раньше, нет сейчас)
+    removed_lastnames = past_lastnames - current_lastnames
+    removed_players = [past_by_lastname[ln] for ln in removed_lastnames]
+
+    return new_players, removed_players
+
 # Файл для хранения составов
 LINEUPS_CACHE_FILE = "d:/scripts/nba_lineups/lineups_cache.json"
 
@@ -1406,6 +1446,33 @@ class LineupsGUI:
         """Запуск AI анализа для выбранной команды."""
         parent_window.destroy()
 
+        # Показываем окно загрузки
+        self.loading_window = tk.Toplevel(self.root)
+        self.loading_window.title("AI Analysis")
+        self.loading_window.geometry("350x150")
+        self.loading_window.configure(bg='#1a1a2e')
+        self.loading_window.resizable(False, False)
+
+        # Центрируем окно
+        self.loading_window.transient(self.root)
+        self.loading_window.grab_set()
+
+        colors = TEAM_COLORS.get(team_abbrev, {'primary': '#9b59b6'})
+
+        # Заголовок команды
+        team_lbl = tk.Label(self.loading_window, text=team_abbrev,
+                           font=('Arial', 18, 'bold'), fg=colors['primary'], bg='#1a1a2e')
+        team_lbl.pack(pady=(20, 10))
+
+        # Текст загрузки
+        self.loading_label = tk.Label(self.loading_window, text="Загрузка данных...",
+                                     font=('Arial', 11), fg='#a0a0a0', bg='#1a1a2e')
+        self.loading_label.pack(pady=5)
+
+        # Анимация точек
+        self.loading_dots = 0
+        self._animate_loading()
+
         self.status_label.config(text=f"AI analyzing {team_abbrev}...", fg='#9b59b6')
 
         # Запускаем в фоне
@@ -1415,6 +1482,14 @@ class LineupsGUI:
             daemon=True
         )
         thread.start()
+
+    def _animate_loading(self):
+        """Анимация точек загрузки."""
+        if hasattr(self, 'loading_window') and self.loading_window.winfo_exists():
+            self.loading_dots = (self.loading_dots + 1) % 4
+            dots = "." * self.loading_dots
+            self.loading_label.config(text=f"AI анализирует{dots}")
+            self.root.after(400, self._animate_loading)
 
     def _run_ai_analysis_thread(self, team_abbrev):
         """Фоновый AI анализ."""
@@ -1429,7 +1504,7 @@ class LineupsGUI:
                     self.historical_cache[team_abbrev] = historical
 
             # Получаем текущий состав
-            current_starters = set()
+            current_starters = []
             for game in self.games:
                 for team_type in ['away_team', 'home_team']:
                     team_data = game.get(team_type, {})
@@ -1437,15 +1512,17 @@ class LineupsGUI:
                         lineup = team_data.get('lineup', [])
                         for player in lineup:
                             if player.get('position') in POSITIONS_ORDER and player.get('status', 'active') != 'out':
-                                current_starters.add(player.get('name'))
+                                current_starters.append(player.get('name'))
                         break
 
-            # Сравниваем составы
-            past_starters = set(historical.get('starters_names', [])) if historical else set()
+            # Сравниваем составы по ФАМИЛИЯМ (разные форматы имён: D. Booker vs Devin Booker)
+            past_starters = historical.get('starters_names', []) if historical else []
+
+            new_players, removed_players = match_players_by_lastname(current_starters, past_starters)
 
             changes = {
-                'new_players': list(current_starters - past_starters),
-                'removed_players': list(past_starters - current_starters)
+                'new_players': new_players,
+                'removed_players': removed_players
             }
 
             # Получаем статистику команды
@@ -1454,11 +1531,12 @@ class LineupsGUI:
             # Запускаем AI анализ
             analysis = analyze_lineup_changes(team_abbrev, changes, team_stats)
 
-            # Показываем результат
-            self.root.after(0, lambda: self._show_ai_analysis_popup(team_abbrev, changes, analysis, historical))
+            # Закрываем окно загрузки и показываем результат
+            self.root.after(0, lambda: self._close_loading_and_show_result(team_abbrev, changes, analysis, historical))
 
         except Exception as e:
             print(f"Ошибка AI анализа: {e}")
+            self.root.after(0, lambda: self._close_loading_window())
             self.root.after(0, lambda: self.status_label.config(
                 text=f"AI Error: {e}", fg='#ff6b6b'
             ))
@@ -1466,6 +1544,16 @@ class LineupsGUI:
         self.root.after(0, lambda: self.status_label.config(
             text=f"{len(self.games)} games today", fg='#a0a0a0'
         ))
+
+    def _close_loading_window(self):
+        """Закрытие окна загрузки."""
+        if hasattr(self, 'loading_window') and self.loading_window.winfo_exists():
+            self.loading_window.destroy()
+
+    def _close_loading_and_show_result(self, team_abbrev, changes, analysis, historical):
+        """Закрытие окна загрузки и показ результата."""
+        self._close_loading_window()
+        self._show_ai_analysis_popup(team_abbrev, changes, analysis, historical)
 
     def _show_ai_analysis_popup(self, team_abbrev, changes, analysis, historical):
         """Показ popup окна с AI анализом."""
@@ -1499,13 +1587,13 @@ class LineupsGUI:
 
         if new_players:
             new_lbl = tk.Label(changes_frame,
-                              text=f"+ NEW in starting: {', '.join(new_players)}",
+                              text=f"+ RETURNING today: {', '.join(new_players)}",
                               font=('Arial', 11, 'bold'), fg='#6bcb77', bg='#16213e')
             new_lbl.pack(anchor='w', padx=10, pady=2)
 
         if removed_players:
             removed_lbl = tk.Label(changes_frame,
-                                  text=f"- OUT from starting: {', '.join(removed_players)}",
+                                  text=f"- OUT today (vs last game): {', '.join(removed_players)}",
                                   font=('Arial', 11, 'bold'), fg='#ff6b6b', bg='#16213e')
             removed_lbl.pack(anchor='w', padx=10, pady=2)
 
