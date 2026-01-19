@@ -4,6 +4,7 @@ AI Analyzer - анализ влияния изменений состава на
 """
 
 import os
+import re
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -14,11 +15,184 @@ except ImportError:
     def get_relevant_news_for_analysis(*args, **kwargs):
         return {'player_news': [], 'team_news': [], 'opponent_news': [], 'has_relevant_news': False}
 
+# Импорт для работы с букмекерскими коэффициентами
+try:
+    from betting_odds import (
+        get_cached_odds, find_player_odds, compare_ai_with_odds,
+        odds_to_probability
+    )
+    BETTING_ODDS_AVAILABLE = True
+except ImportError:
+    BETTING_ODDS_AVAILABLE = False
+
 # Загружаем переменные окружения
 load_dotenv()
 
 # Инициализация клиента
 client = None
+
+
+def parse_ai_prediction_ranges(ai_response: str) -> dict:
+    """
+    Парсинг диапазонов прогнозов из ответа AI.
+
+    Ищет паттерны вида:
+    - Очки: 18-24
+    - Подборы: 5-8
+    - Передачи: 3-6
+
+    Returns:
+        dict с ключами 'points', 'rebounds', 'assists' и значениями (min, max)
+    """
+    result = {}
+
+    # Паттерны для поиска диапазонов
+    patterns = {
+        'points': [
+            r'[Оо]чки[:\s]+(\d+)\s*[-–]\s*(\d+)',
+            r'[Pp]oints[:\s]+(\d+)\s*[-–]\s*(\d+)',
+            r'(\d+)\s*[-–]\s*(\d+)\s*очк',
+            r'(\d+)\s*[-–]\s*(\d+)\s*pts',
+        ],
+        'rebounds': [
+            r'[Пп]одбор[ыа][:\s]+(\d+)\s*[-–]\s*(\d+)',
+            r'[Rr]ebounds[:\s]+(\d+)\s*[-–]\s*(\d+)',
+            r'(\d+)\s*[-–]\s*(\d+)\s*подбор',
+            r'(\d+)\s*[-–]\s*(\d+)\s*reb',
+        ],
+        'assists': [
+            r'[Пп]ередач[иа][:\s]+(\d+)\s*[-–]\s*(\d+)',
+            r'[Aa]ssists[:\s]+(\d+)\s*[-–]\s*(\d+)',
+            r'(\d+)\s*[-–]\s*(\d+)\s*передач',
+            r'(\d+)\s*[-–]\s*(\d+)\s*ast',
+        ],
+    }
+
+    for stat_type, stat_patterns in patterns.items():
+        for pattern in stat_patterns:
+            match = re.search(pattern, ai_response, re.IGNORECASE)
+            if match:
+                try:
+                    min_val = float(match.group(1))
+                    max_val = float(match.group(2))
+                    result[stat_type] = (min_val, max_val)
+                    break
+                except (ValueError, IndexError):
+                    continue
+
+    return result
+
+
+def compare_with_bookmaker_odds(player_name: str, ai_predictions: dict) -> str:
+    """
+    Сравнение прогнозов AI с букмекерскими линиями.
+
+    Args:
+        player_name: Имя игрока
+        ai_predictions: Словарь с прогнозами AI {stat_type: (min, max)}
+
+    Returns:
+        Форматированная строка с результатами сравнения
+    """
+    if not BETTING_ODDS_AVAILABLE:
+        return ""
+
+    if not ai_predictions:
+        return ""
+
+    try:
+        odds_data = get_cached_odds()
+        if not odds_data:
+            return ""
+    except Exception as e:
+        return f"\n\n⚠️ Ошибка загрузки букмекерских данных: {e}"
+
+    # Ищем коэффициенты для игрока
+    all_player_odds = find_player_odds(player_name, odds_data)
+
+    if not all_player_odds:
+        return ""
+
+    # Группируем по типу статистики и выбираем основные линии
+    odds_by_type = {}
+    for odds in all_player_odds:
+        stat_type = odds.stat_type
+        if stat_type not in odds_by_type:
+            odds_by_type[stat_type] = []
+        odds_by_type[stat_type].append(odds)
+
+    comparisons = []
+    stat_names = {
+        'points': 'Очки',
+        'rebounds': 'Подборы',
+        'assists': 'Передачи',
+        'pra': 'О+П+П'
+    }
+
+    for stat_type, ai_range in ai_predictions.items():
+        if stat_type not in odds_by_type:
+            continue
+
+        # Берём основную линию (ближайшую к среднему прогнозу AI)
+        ai_mid = (ai_range[0] + ai_range[1]) / 2
+
+        # Сортируем линии по близости к прогнозу AI
+        sorted_odds = sorted(
+            odds_by_type[stat_type],
+            key=lambda x: abs(x.total_line - ai_mid)
+        )
+
+        # Берём ближайшую линию
+        if sorted_odds:
+            main_odds = sorted_odds[0]
+
+            comparison = compare_ai_with_odds(
+                ai_prediction_range=ai_range,
+                total_line=main_odds.total_line,
+                over_odds=main_odds.over_odds,
+                under_odds=main_odds.under_odds
+            )
+            comparison['stat_type'] = stat_type
+            comparison['stat_name'] = stat_names.get(stat_type, stat_type)
+            comparisons.append(comparison)
+
+    if not comparisons:
+        return ""
+
+    # Форматируем вывод
+    lines = ["\n\n📊 СРАВНЕНИЕ С БУКМЕКЕРСКИМИ ЛИНИЯМИ:"]
+
+    for comp in comparisons:
+        stat_emoji = {'points': '🏀', 'rebounds': '📊', 'assists': '🎯', 'pra': '📈'}.get(
+            comp['stat_type'], '•'
+        )
+
+        line = comp['total_line']
+        ai_pred = comp['ai_prediction']
+        over = comp['over_odds']
+        under = comp['under_odds']
+        diff = comp['diff_from_line']
+
+        over_prob = odds_to_probability(over) * 100 if over > 1 else 0
+        under_prob = odds_to_probability(under) * 100 if under > 1 else 0
+
+        direction_ru = "больше" if comp['ai_direction'] == 'over' else "меньше"
+        bookie_favors = comp['bookie_favors']
+        bookie_ru = "больше" if bookie_favors == 'over' else ("меньше" if bookie_favors == 'under' else "неопределено")
+
+        lines.append(f"\n{stat_emoji} {comp['stat_name']} (линия {line}):")
+        lines.append(f"   Прогноз AI: {ai_pred} → ставит на {direction_ru}")
+        lines.append(f"   Букмекер: Б{line}={over} ({over_prob:.0f}%), М{line}={under} ({under_prob:.0f}%)")
+
+        if bookie_favors == "neutral":
+            lines.append(f"   ℹ️ Нет достаточных данных от букмекера")
+        elif comp['ai_agrees_with_bookie']:
+            lines.append(f"   ✅ AI согласен с букмекером ({bookie_ru})")
+        else:
+            lines.append(f"   ⚠️ AI НЕ согласен с букмекером (бук ставит на {bookie_ru})")
+            lines.append(f"   💡 Потенциальная value ставка на {direction_ru}!")
+
+    return "\n".join(lines)
 
 
 def init_openai():
@@ -339,7 +513,13 @@ def analyze_player_projection(
             temperature=0.7
         )
 
-        return response.choices[0].message.content
+        ai_response = response.choices[0].message.content
+
+        # Парсим прогнозы AI и сравниваем с букмекерскими линиями
+        ai_predictions = parse_ai_prediction_ranges(ai_response)
+        odds_comparison = compare_with_bookmaker_odds(player_name, ai_predictions)
+
+        return ai_response + odds_comparison
 
     except Exception as e:
         return f"Ошибка AI анализа: {e}"
