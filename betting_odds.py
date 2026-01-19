@@ -127,6 +127,18 @@ RUSSIAN_TO_ENGLISH_PLAYERS = {
     "Аджай Митчелл": "AJ Mitchell",
     "Джейлон Тайсон": "Jaylon Tyson",
     "Крейг Портер-мл.": "Craig Porter Jr.",
+    "Кевин Портер-младший": "Kevin Porter Jr.",
+    "Майкл Портер-младший": "Michael Porter Jr.",
+    "Яннис Адетокунбо": "Giannis Antetokounmpo",
+    "Бобби Портис": "Bobby Portis",
+    "Дайсон Дэниелс": "Dyson Daniels",
+    "Никкиль Александер-Уокер": "Nickeil Alexander-Walker",
+    "Джейлен Джонсон": "Jalen Johnson",
+    "Майлс Тернер": "Myles Turner",
+    "Николас Клэкстон": "Nic Claxton",
+    "Марк Уильямс": "Mark Williams",
+    "Ной Клоуни": "Noah Clowney",
+    "Девин Букер": "Devin Booker",
 }
 
 # Обратный словарь
