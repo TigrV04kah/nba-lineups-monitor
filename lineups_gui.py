@@ -15,7 +15,10 @@ from nba_lineups_scraper import (
     get_team_last_game_starters_nba_api, get_multiple_teams_last_starters,
     get_team_last_n_games_stats
 )
-from ai_analyzer import analyze_lineup_changes, init_openai
+from ai_analyzer import analyze_lineup_changes, analyze_player_projection, init_openai
+from news_scraper import get_news_by_team, get_news_for_matchup, get_latest_news, scrape_news, init_database
+from team_mapping import get_team_name
+import webbrowser
 
 def get_last_name(full_name):
     """Извлечение фамилии из полного имени для сравнения."""
@@ -140,6 +143,13 @@ class LineupsGUI:
         else:
             print("AI анализатор недоступен - проверьте .env файл")
 
+        # Инициализируем базу новостей
+        try:
+            init_database()
+            print("База новостей инициализирована")
+        except Exception as e:
+            print(f"Ошибка инициализации базы новостей: {e}")
+
         # Загружаем кэши если есть
         self.load_cache()
         self.load_historical_cache()
@@ -154,8 +164,11 @@ class LineupsGUI:
 
         self.load_data()
 
-        # Запускаем автопроверку
+        # Запускаем автопроверку составов
         self.schedule_auto_check()
+
+        # Запускаем фоновое обновление новостей при старте
+        self.update_news_in_background()
 
     def setup_ui(self):
         # Заголовок
@@ -201,6 +214,14 @@ class LineupsGUI:
                                 relief='flat', padx=10, pady=5)
         self.ai_btn.pack(side='right', padx=5, pady=15)
 
+        # Кнопка Новости
+        self.news_btn = tk.Button(header_frame, text="📰 News",
+                                  command=self.show_news_window,
+                                  bg='#e67e22', fg='white',
+                                  font=('Arial', 10, 'bold'),
+                                  relief='flat', padx=10, pady=5)
+        self.news_btn.pack(side='right', padx=5, pady=15)
+
         # Кнопка тестового изменения (для отладки)
         self.test_btn = tk.Button(header_frame, text="Test Change",
                                   command=self.simulate_change,
@@ -225,13 +246,17 @@ class LineupsGUI:
                                     font=('Arial', 10), fg='#a0a0a0', bg='#16213e')
         self.status_label.pack(side='right', padx=10, pady=15)
 
-        # Контейнер для скролла
-        container = tk.Frame(self.root, bg='#1a1a2e')
-        container.pack(fill='both', expand=True, padx=10, pady=10)
+        # Главный контейнер с двумя колонками: игры слева, новости справа
+        main_container = tk.Frame(self.root, bg='#1a1a2e')
+        main_container.pack(fill='both', expand=True, padx=10, pady=10)
 
-        # Canvas и scrollbar
-        self.canvas = tk.Canvas(container, bg='#1a1a2e', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient='vertical', command=self.canvas.yview)
+        # Левая часть - игры (70% ширины)
+        games_container = tk.Frame(main_container, bg='#1a1a2e')
+        games_container.pack(side='left', fill='both', expand=True)
+
+        # Canvas и scrollbar для игр
+        self.canvas = tk.Canvas(games_container, bg='#1a1a2e', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(games_container, orient='vertical', command=self.canvas.yview)
 
         self.scrollable_frame = tk.Frame(self.canvas, bg='#1a1a2e')
 
@@ -243,14 +268,182 @@ class LineupsGUI:
         self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor='nw')
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
-        # Mouse wheel scrolling
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-
         scrollbar.pack(side='right', fill='y')
         self.canvas.pack(side='left', fill='both', expand=True)
 
+        # Правая часть - панель новостей (фиксированная ширина 320px)
+        self._create_news_panel(main_container)
+
+        # Mouse wheel scrolling - только когда курсор над canvas игр
+        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._on_mousewheel))
+        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    def _on_news_mousewheel(self, event):
+        """Скролл для панели новостей."""
+        self.news_panel_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    def _create_news_panel(self, parent):
+        """Создание боковой панели новостей."""
+        # Контейнер панели (480px = 320 + 50%)
+        news_panel = tk.Frame(parent, bg='#16213e', width=480)
+        news_panel.pack(side='right', fill='y', padx=(10, 0))
+        news_panel.pack_propagate(False)  # Фиксируем ширину
+
+        # Заголовок панели
+        header = tk.Frame(news_panel, bg='#e67e22')
+        header.pack(fill='x')
+
+        title = tk.Label(header, text="Latest News",
+                        font=('Arial', 12, 'bold'), fg='white', bg='#e67e22')
+        title.pack(side='left', padx=10, pady=8)
+
+        # Кнопка обновления
+        refresh_btn = tk.Button(header, text="Refresh",
+                               command=self._refresh_news_panel,
+                               bg='#d35400', fg='white',
+                               font=('Arial', 9),
+                               relief='flat', padx=8, pady=2)
+        refresh_btn.pack(side='right', padx=10, pady=8)
+
+        # Скроллируемый контейнер для новостей
+        container = tk.Frame(news_panel, bg='#1a1a2e')
+        container.pack(fill='both', expand=True, padx=5, pady=5)
+
+        self.news_panel_canvas = tk.Canvas(container, bg='#1a1a2e', highlightthickness=0, width=460)
+        scrollbar = ttk.Scrollbar(container, orient='vertical', command=self.news_panel_canvas.yview)
+
+        self.news_panel_frame = tk.Frame(self.news_panel_canvas, bg='#1a1a2e')
+        self.news_panel_frame.bind(
+            "<Configure>",
+            lambda e: self.news_panel_canvas.configure(scrollregion=self.news_panel_canvas.bbox("all"))
+        )
+
+        self.news_panel_canvas.create_window((0, 0), window=self.news_panel_frame, anchor='nw')
+        self.news_panel_canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Mouse wheel для новостей
+        self.news_panel_canvas.bind("<Enter>", lambda e: self.news_panel_canvas.bind_all("<MouseWheel>", self._on_news_mousewheel))
+        self.news_panel_canvas.bind("<Leave>", lambda e: self.news_panel_canvas.unbind_all("<MouseWheel>"))
+
+        scrollbar.pack(side='right', fill='y')
+        self.news_panel_canvas.pack(side='left', fill='both', expand=True)
+
+        # Загружаем новости
+        self._load_news_panel()
+
+    def _load_news_panel(self):
+        """Загрузка новостей в боковую панель."""
+        # Очищаем
+        for widget in self.news_panel_frame.winfo_children():
+            widget.destroy()
+
+        try:
+            news_list = get_latest_news(15)  # Последние 15 новостей
+        except Exception as e:
+            error_label = tk.Label(self.news_panel_frame,
+                                  text=f"Error: {e}",
+                                  font=('Arial', 10), fg='#ff6b6b', bg='#1a1a2e',
+                                  wraplength=280)
+            error_label.pack(pady=20)
+            return
+
+        if not news_list:
+            no_news = tk.Label(self.news_panel_frame,
+                              text="No news available.\nClick Refresh to update.",
+                              font=('Arial', 10), fg='#a0a0a0', bg='#1a1a2e')
+            no_news.pack(pady=30)
+            return
+
+        # Отображаем новости компактно
+        for news in news_list:
+            self._create_news_panel_card(news)
+
+    def _create_news_panel_card(self, news):
+        """Создание компактной карточки новости для боковой панели."""
+        card = tk.Frame(self.news_panel_frame, bg='#0f3460', cursor='hand2')
+        card.pack(fill='x', pady=3, padx=5)  # Добавлен отступ слева/справа для карточки
+
+        # Дата
+        published = news.get('published_at', '')
+        if published:
+            try:
+                dt = datetime.strptime(str(published)[:19], '%Y-%m-%d %H:%M:%S')
+                date_str = dt.strftime('%d.%m %H:%M')
+            except:
+                date_str = ''
+        else:
+            date_str = ''
+
+        # Верхняя строка: дата и команды
+        meta_frame = tk.Frame(card, bg='#0f3460')
+        meta_frame.pack(fill='x', padx=10, pady=(5, 2))
+
+        if date_str:
+            date_label = tk.Label(meta_frame, text=date_str,
+                                 font=('Arial', 8), fg='#888888', bg='#0f3460')
+            date_label.pack(side='left')
+
+        # Теги команд
+        teams_str = news.get('teams', '')
+        if teams_str:
+            teams = teams_str.split(',')[:2]  # Максимум 2 тега
+            for team in teams:
+                team = team.strip()
+                color = TEAM_COLORS.get(team, {}).get('primary', '#444444')
+                tag = tk.Label(meta_frame, text=team,
+                              font=('Arial', 7, 'bold'), fg='white', bg=color,
+                              padx=4, pady=1)
+                tag.pack(side='right', padx=1)
+
+        # Заголовок новости (без обрезки - wraplength сам переносит)
+        title = news.get('title', 'No title')
+
+        title_label = tk.Label(card, text=title,
+                              font=('Arial', 9), fg='#ffffff', bg='#0f3460',
+                              wraplength=420, justify='left', anchor='w')
+        title_label.pack(fill='x', padx=10, pady=(0, 8))
+
+        # Клик открывает ссылку
+        url = news.get('url', '')
+        if url:
+            card.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+            title_label.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+            meta_frame.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+
+        # Hover эффект
+        def on_enter(e):
+            card.configure(bg='#1a4a7a')
+            title_label.configure(bg='#1a4a7a')
+            meta_frame.configure(bg='#1a4a7a')
+            for child in meta_frame.winfo_children():
+                if isinstance(child, tk.Label) and child.cget('fg') == '#888888':
+                    child.configure(bg='#1a4a7a')
+
+        def on_leave(e):
+            card.configure(bg='#0f3460')
+            title_label.configure(bg='#0f3460')
+            meta_frame.configure(bg='#0f3460')
+            for child in meta_frame.winfo_children():
+                if isinstance(child, tk.Label) and child.cget('fg') == '#888888':
+                    child.configure(bg='#0f3460')
+
+        card.bind("<Enter>", on_enter)
+        card.bind("<Leave>", on_leave)
+
+    def _refresh_news_panel(self):
+        """Обновление новостей в боковой панели."""
+        def update():
+            try:
+                scrape_news(pages=2)
+            except Exception as e:
+                print(f"Error updating news: {e}")
+            self.root.after(0, self._load_news_panel)
+
+        thread = threading.Thread(target=update, daemon=True)
+        thread.start()
 
     def load_data(self):
         """Загрузка данных в фоновом потоке."""
@@ -312,9 +505,12 @@ class LineupsGUI:
 
         # Левая команда (Away)
         away = game.get('away_team', {})
+        home = game.get('home_team', {})
+
         away_frame = tk.Frame(teams_frame, bg='#16213e')
         away_frame.pack(side='left', fill='both', expand=True, padx=5)
-        self.create_team_lineup(away_frame, away, 'away')
+        # Away team plays against Home team, not at home
+        self.create_team_lineup(away_frame, away, 'away', opponent_abbrev=home.get('abbrev'), is_home=False)
 
         # VS посередине
         vs_frame = tk.Frame(teams_frame, bg='#16213e', width=60)
@@ -326,12 +522,12 @@ class LineupsGUI:
         vs_label.pack(expand=True)
 
         # Правая команда (Home)
-        home = game.get('home_team', {})
         home_frame = tk.Frame(teams_frame, bg='#16213e')
         home_frame.pack(side='left', fill='both', expand=True, padx=5)
-        self.create_team_lineup(home_frame, home, 'home')
+        # Home team plays against Away team, at home
+        self.create_team_lineup(home_frame, home, 'home', opponent_abbrev=away.get('abbrev'), is_home=True)
 
-    def create_team_lineup(self, parent, team_data, team_type):
+    def create_team_lineup(self, parent, team_data, team_type, opponent_abbrev=None, is_home=None):
         """Создание блока состава одной команды."""
         abbrev = team_data.get('abbrev', '???')
         record = team_data.get('record', '')
@@ -367,7 +563,7 @@ class LineupsGUI:
 
         # Привязываем клик к заголовку и всем его элементам
         for widget in [team_header, team_name, record_label, stats_hint]:
-            widget.bind('<Button-1>', lambda e, a=abbrev: self.show_team_stats(a))
+            widget.bind('<Button-1>', lambda e, a=abbrev, o=opponent_abbrev, h=is_home: self.show_team_stats(a, o, h))
 
         # Список игроков
         players_frame = tk.Frame(parent, bg='#1a1a2e')
@@ -1133,27 +1329,27 @@ class LineupsGUI:
             fg='#a0a0a0'
         )
 
-    def show_team_stats(self, team_abbrev):
-        """Показ статистики команды за последние 3 игры."""
+    def show_team_stats(self, team_abbrev, opponent_abbrev=None, is_home=None):
+        """Показ статистики команды за последние 5 игр."""
         # Показываем статус
         self.status_label.config(text=f"Loading {team_abbrev} stats...", fg='#ffd93d')
 
         # Запускаем в фоне
         thread = threading.Thread(
             target=self._fetch_team_stats,
-            args=(team_abbrev,),
+            args=(team_abbrev, opponent_abbrev, is_home),
             daemon=True
         )
         thread.start()
 
-    def _fetch_team_stats(self, team_abbrev):
+    def _fetch_team_stats(self, team_abbrev, opponent_abbrev=None, is_home=None):
         """Фоновая загрузка статистики команды с кэшированием."""
         try:
             # Проверяем кэш
             if self.is_team_stats_cache_valid(team_abbrev):
                 print(f"Статистика {team_abbrev}: из кэша")
                 data = self.team_stats_cache[team_abbrev]
-                self.root.after(0, lambda: self._show_team_stats_window(data))
+                self.root.after(0, lambda: self._show_team_stats_window(data, opponent_abbrev, is_home))
                 self.root.after(0, lambda: self.status_label.config(
                     text=f"{len(self.games)} games today (cached)", fg='#a0a0a0'
                 ))
@@ -1161,7 +1357,7 @@ class LineupsGUI:
 
             # Загружаем с API
             print(f"Загрузка статистики {team_abbrev} с API...")
-            data = get_team_last_n_games_stats(team_abbrev, n_games=3, season='2025-26')
+            data = get_team_last_n_games_stats(team_abbrev, n_games=5, season='2025-26')
 
             if data:
                 # Добавляем метку времени и сохраняем в кэш
@@ -1169,7 +1365,7 @@ class LineupsGUI:
                 self.team_stats_cache[team_abbrev] = data
                 self.save_team_stats_cache()
 
-                self.root.after(0, lambda: self._show_team_stats_window(data))
+                self.root.after(0, lambda: self._show_team_stats_window(data, opponent_abbrev, is_home))
             else:
                 self.root.after(0, lambda: self.status_label.config(
                     text=f"No data for {team_abbrev}", fg='#ff6b6b'
@@ -1229,7 +1425,7 @@ class LineupsGUI:
                 else:
                     # Загружаем с API
                     print(f"  {team_abbrev}: загрузка... ({cached + loaded}/{total})")
-                    data = get_team_last_n_games_stats(team_abbrev, n_games=3, season='2025-26')
+                    data = get_team_last_n_games_stats(team_abbrev, n_games=5, season='2025-26')
 
                     if data:
                         data['cached_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1255,7 +1451,7 @@ class LineupsGUI:
         ))
         print(f"Предзагрузка завершена: {cached} из кэша, {loaded} загружено")
 
-    def _show_team_stats_window(self, data):
+    def _show_team_stats_window(self, data, opponent_abbrev=None, is_home=None):
         """Показ окна со статистикой команды."""
         team_abbrev = data['team']
         team_name = data.get('team_name', team_abbrev)
@@ -1265,8 +1461,8 @@ class LineupsGUI:
 
         # Создаём окно
         stats_window = tk.Toplevel(self.root)
-        stats_window.title(f"{team_abbrev} - Last 3 Games Stats")
-        stats_window.geometry("900x600")
+        stats_window.title(f"{team_abbrev} - Last 5 Games Stats")
+        stats_window.geometry("900x750")
         stats_window.configure(bg='#1a1a2e')
 
         # Заголовок
@@ -1277,9 +1473,17 @@ class LineupsGUI:
                          font=('Arial', 18, 'bold'), fg='white', bg=colors['primary'])
         header.pack(pady=15)
 
-        sub_header = tk.Label(header_frame, text="Starting Lineup - Last 3 Games",
+        sub_title = "Starting Lineup - Last 5 Games"
+        if opponent_abbrev:
+            sub_title += f" | Next: vs {opponent_abbrev}"
+        sub_header = tk.Label(header_frame, text=sub_title,
                              font=('Arial', 11), fg='#cccccc', bg=colors['primary'])
-        sub_header.pack(pady=(0, 10))
+        sub_header.pack(pady=(0, 5))
+
+        # Подсказка о кликабельности
+        hint = tk.Label(header_frame, text="Click on player name for AI projection",
+                       font=('Arial', 9, 'italic'), fg='#9b59b6', bg=colors['primary'])
+        hint.pack(pady=(0, 10))
 
         # Контейнер для скролла
         container = tk.Frame(stats_window, bg='#1a1a2e')
@@ -1340,25 +1544,36 @@ class LineupsGUI:
                 player_row = tk.Frame(stats_frame, bg='#16213e')
                 player_row.pack(fill='x')
 
-                values = [
-                    starter['position'],
-                    starter['name'][:18],  # Обрезаем длинные имена
-                    starter['min'] if starter['min'] else '-',
-                    str(starter['pts']),
-                    str(starter['reb']),
-                    str(starter['ast']),
-                    str(starter['stl']),
-                    str(starter['blk'])
-                ]
+                # Позиция
+                pos_lbl = tk.Label(player_row, text=starter['position'], font=('Consolas', 10),
+                                  fg='white', bg='#16213e', width=col_widths[0], anchor='center')
+                pos_lbl.pack(side='left', padx=1)
 
-                # Подсветка высоких показателей
+                # Имя игрока (кликабельное)
+                player_name = starter['name']
+                player_position = starter['position']
+                name_lbl = tk.Label(player_row, text=player_name[:18], font=('Consolas', 10, 'underline'),
+                                   fg='#9b59b6', bg='#16213e', width=col_widths[1], anchor='w', cursor='hand2')
+                name_lbl.pack(side='left', padx=1)
+
+                # Привязываем клик к имени
+                name_lbl.bind('<Button-1>', lambda e, pn=player_name, pp=player_position, ta=team_abbrev, g=games, oa=opponent_abbrev, ih=is_home:
+                             self._on_player_click(pn, pp, ta, g, oa, ih))
+                name_lbl.bind('<Enter>', lambda e, lbl=name_lbl: lbl.config(fg='#c39bd3'))
+                name_lbl.bind('<Leave>', lambda e, lbl=name_lbl: lbl.config(fg='#9b59b6'))
+
+                # Остальные статы
+                mins = starter['min'] if starter['min'] else '-'
                 pts_color = '#ffd93d' if starter['pts'] >= 20 else 'white'
                 reb_color = '#6bcb77' if starter['reb'] >= 10 else 'white'
                 ast_color = '#4fc3f7' if starter['ast'] >= 8 else 'white'
 
-                colors_row = ['white', 'white', '#a0a0a0', pts_color, reb_color, ast_color, 'white', 'white']
+                stat_values = [mins, str(starter['pts']), str(starter['reb']), str(starter['ast']),
+                              str(starter['stl']), str(starter['blk'])]
+                stat_colors = ['#a0a0a0', pts_color, reb_color, ast_color, 'white', 'white']
+                stat_widths = col_widths[2:]
 
-                for val, w, col in zip(values, col_widths, colors_row):
+                for val, w, col in zip(stat_values, stat_widths, stat_colors):
                     lbl = tk.Label(player_row, text=val, font=('Consolas', 10),
                                   fg=col, bg='#16213e', width=w, anchor='center')
                     lbl.pack(side='left', padx=1)
@@ -1366,6 +1581,169 @@ class LineupsGUI:
         # Кнопка закрытия
         close_btn = tk.Button(stats_window, text="Close",
                              command=stats_window.destroy,
+                             bg=colors['primary'], fg='white',
+                             font=('Arial', 11, 'bold'),
+                             relief='flat', padx=30, pady=8)
+        close_btn.pack(pady=15)
+
+    def _on_player_click(self, player_name, player_position, team_abbrev, games, opponent_abbrev, is_home):
+        """Обработка клика на имени игрока - запуск AI анализа."""
+        if not self.ai_enabled:
+            messagebox.showwarning("AI недоступен",
+                                   "AI анализ недоступен.\n\nСоздайте файл .env с вашим OpenAI API ключом:\nOPENAI_API_KEY=sk-...")
+            return
+
+        # Собираем статистику игрока из всех игр
+        player_stats = []
+        for game in games:
+            for starter in game.get('starters', []):
+                if starter['name'] == player_name:
+                    player_stats.append({
+                        'matchup': game.get('matchup', 'N/A'),
+                        'pts': starter.get('pts', 0),
+                        'reb': starter.get('reb', 0),
+                        'ast': starter.get('ast', 0),
+                        'stl': starter.get('stl', 0),
+                        'blk': starter.get('blk', 0),
+                        'min': starter.get('min', 0)  # Передаём как есть (строка "MM:SS"), парсинг в ai_analyzer
+                    })
+                    break
+
+        # Показываем окно загрузки
+        self.player_loading_window = tk.Toplevel(self.root)
+        self.player_loading_window.title("AI Player Projection")
+        self.player_loading_window.geometry("400x150")
+        self.player_loading_window.configure(bg='#1a1a2e')
+        self.player_loading_window.resizable(False, False)
+        self.player_loading_window.transient(self.root)
+        self.player_loading_window.grab_set()
+
+        colors = TEAM_COLORS.get(team_abbrev, {'primary': '#9b59b6'})
+
+        player_lbl = tk.Label(self.player_loading_window, text=player_name,
+                             font=('Arial', 16, 'bold'), fg=colors['primary'], bg='#1a1a2e')
+        player_lbl.pack(pady=(20, 5))
+
+        team_lbl = tk.Label(self.player_loading_window, text=f"{team_abbrev} | {player_position}",
+                           font=('Arial', 11), fg='#a0a0a0', bg='#1a1a2e')
+        team_lbl.pack(pady=5)
+
+        self.player_loading_label = tk.Label(self.player_loading_window, text="AI анализирует...",
+                                            font=('Arial', 10), fg='#9b59b6', bg='#1a1a2e')
+        self.player_loading_label.pack(pady=10)
+
+        # Анимация
+        self.player_loading_dots = 0
+        self._animate_player_loading()
+
+        # Получаем статистику соперника
+        opponent_stats = self.team_stats_cache.get(opponent_abbrev) if opponent_abbrev else None
+
+        # Запускаем анализ в фоне
+        thread = threading.Thread(
+            target=self._run_player_analysis_thread,
+            args=(player_name, player_position, team_abbrev, player_stats, opponent_abbrev, opponent_stats, is_home),
+            daemon=True
+        )
+        thread.start()
+
+    def _animate_player_loading(self):
+        """Анимация загрузки для анализа игрока."""
+        if hasattr(self, 'player_loading_window') and self.player_loading_window.winfo_exists():
+            self.player_loading_dots = (self.player_loading_dots + 1) % 4
+            dots = "." * self.player_loading_dots
+            self.player_loading_label.config(text=f"AI анализирует{dots}")
+            self.root.after(400, self._animate_player_loading)
+
+    def _run_player_analysis_thread(self, player_name, player_position, team_abbrev, player_stats,
+                                    opponent_abbrev, opponent_stats, is_home):
+        """Фоновый AI анализ игрока."""
+        try:
+            analysis = analyze_player_projection(
+                player_name=player_name,
+                player_position=player_position,
+                team_abbrev=team_abbrev,
+                player_stats=player_stats,
+                opponent_abbrev=opponent_abbrev or "N/A",
+                opponent_stats=opponent_stats,
+                is_home=is_home if is_home is not None else True
+            )
+
+            self.root.after(0, lambda: self._show_player_projection_popup(
+                player_name, player_position, team_abbrev, player_stats, opponent_abbrev, analysis
+            ))
+
+        except Exception as e:
+            print(f"Ошибка AI анализа игрока: {e}")
+            self.root.after(0, lambda: self._close_player_loading())
+
+    def _close_player_loading(self):
+        """Закрытие окна загрузки анализа игрока."""
+        if hasattr(self, 'player_loading_window') and self.player_loading_window.winfo_exists():
+            self.player_loading_window.destroy()
+
+    def _show_player_projection_popup(self, player_name, player_position, team_abbrev, player_stats,
+                                      opponent_abbrev, analysis):
+        """Показ popup с прогнозом по игроку."""
+        self._close_player_loading()
+
+        colors = TEAM_COLORS.get(team_abbrev, {'primary': '#333333', 'secondary': '#666666'})
+
+        popup = tk.Toplevel(self.root)
+        popup.title(f"AI Projection - {player_name}")
+        popup.geometry("550x600")
+        popup.configure(bg='#1a1a2e')
+
+        # Заголовок
+        header_frame = tk.Frame(popup, bg=colors['primary'])
+        header_frame.pack(fill='x')
+
+        name_lbl = tk.Label(header_frame, text=player_name,
+                           font=('Arial', 16, 'bold'), fg='white', bg=colors['primary'])
+        name_lbl.pack(pady=(15, 5))
+
+        info_text = f"{team_abbrev} | {player_position}"
+        if opponent_abbrev:
+            info_text += f" | vs {opponent_abbrev}"
+        info_lbl = tk.Label(header_frame, text=info_text,
+                           font=('Arial', 11), fg='#cccccc', bg=colors['primary'])
+        info_lbl.pack(pady=(0, 15))
+
+        # Краткая статистика игрока
+        if player_stats:
+            stats_frame = tk.Frame(popup, bg='#16213e')
+            stats_frame.pack(fill='x', padx=15, pady=10)
+
+            avg_pts = sum(g.get('pts', 0) for g in player_stats) / len(player_stats)
+            avg_reb = sum(g.get('reb', 0) for g in player_stats) / len(player_stats)
+            avg_ast = sum(g.get('ast', 0) for g in player_stats) / len(player_stats)
+
+            avg_lbl = tk.Label(stats_frame,
+                              text=f"Last {len(player_stats)} games avg: {avg_pts:.1f} PTS | {avg_reb:.1f} REB | {avg_ast:.1f} AST",
+                              font=('Arial', 11, 'bold'), fg='#ffd93d', bg='#16213e')
+            avg_lbl.pack(pady=10)
+
+        # AI прогноз
+        analysis_frame = tk.Frame(popup, bg='#1a1a2e')
+        analysis_frame.pack(fill='both', expand=True, padx=15, pady=10)
+
+        analysis_header = tk.Label(analysis_frame, text="AI Projection",
+                                  font=('Arial', 12, 'bold'), fg='#9b59b6', bg='#1a1a2e')
+        analysis_header.pack(anchor='w', pady=5)
+
+        text_frame = tk.Frame(analysis_frame, bg='#16213e')
+        text_frame.pack(fill='both', expand=True)
+
+        text_widget = tk.Text(text_frame, wrap='word', font=('Arial', 11),
+                             bg='#16213e', fg='white', relief='flat',
+                             padx=15, pady=15)
+        text_widget.pack(fill='both', expand=True)
+        text_widget.insert('1.0', analysis)
+        text_widget.config(state='disabled')
+
+        # Кнопка закрытия
+        close_btn = tk.Button(popup, text="Close",
+                             command=popup.destroy,
                              bg=colors['primary'], fg='white',
                              font=('Arial', 11, 'bold'),
                              relief='flat', padx=30, pady=8)
@@ -1654,6 +2032,260 @@ class LineupsGUI:
                 daemon=True
             )
             thread.start()
+
+    def show_news_window(self):
+        """Показ окна с новостями NBA."""
+        # Создаём окно
+        news_window = tk.Toplevel(self.root)
+        news_window.title("NBA News - Championat.ru")
+        news_window.geometry("900x700")
+        news_window.configure(bg='#1a1a2e')
+
+        # Заголовок
+        header_frame = tk.Frame(news_window, bg='#e67e22')
+        header_frame.pack(fill='x')
+
+        header = tk.Label(header_frame, text="📰 NBA News",
+                         font=('Arial', 18, 'bold'), fg='white', bg='#e67e22')
+        header.pack(side='left', padx=20, pady=15)
+
+        # Кнопка обновления новостей
+        refresh_btn = tk.Button(header_frame, text="🔄 Update News",
+                               command=lambda: self._refresh_news_in_window(news_window),
+                               bg='#d35400', fg='white',
+                               font=('Arial', 10, 'bold'),
+                               relief='flat', padx=15, pady=5)
+        refresh_btn.pack(side='right', padx=20, pady=15)
+
+        # Фильтр по команде
+        filter_frame = tk.Frame(news_window, bg='#16213e')
+        filter_frame.pack(fill='x', padx=10, pady=5)
+
+        filter_label = tk.Label(filter_frame, text="Filter by team:",
+                               font=('Arial', 10), fg='#a0a0a0', bg='#16213e')
+        filter_label.pack(side='left', padx=10)
+
+        # Собираем команды из текущих игр
+        teams = ["All"]
+        for game in self.games:
+            away = game.get('away_team', {}).get('abbrev')
+            home = game.get('home_team', {}).get('abbrev')
+            if away and away not in teams:
+                teams.append(away)
+            if home and home not in teams:
+                teams.append(home)
+
+        self.news_filter_var = tk.StringVar(value="All")
+        for team in teams[:10]:  # Ограничиваем до 10 кнопок
+            btn_color = TEAM_COLORS.get(team, {}).get('primary', '#333333') if team != "All" else '#555555'
+            btn = tk.Button(filter_frame, text=team,
+                           command=lambda t=team: self._filter_news(t, news_window),
+                           bg=btn_color, fg='white',
+                           font=('Arial', 9, 'bold'),
+                           relief='flat', padx=8, pady=3)
+            btn.pack(side='left', padx=3)
+
+        # Скроллируемый фрейм для новостей
+        container = tk.Frame(news_window, bg='#1a1a2e')
+        container.pack(fill='both', expand=True, padx=10, pady=10)
+
+        canvas = tk.Canvas(container, bg='#1a1a2e', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient='vertical', command=canvas.yview)
+
+        self.news_scrollable_frame = tk.Frame(canvas, bg='#1a1a2e')
+        self.news_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=self.news_scrollable_frame, anchor='nw')
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Mouse wheel
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        scrollbar.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+
+        self.news_canvas = canvas
+
+        # Загружаем новости
+        self._load_news_to_frame("All")
+
+    def _filter_news(self, team_abbrev, window):
+        """Фильтрация новостей по команде."""
+        self.news_filter_var.set(team_abbrev)
+        self._load_news_to_frame(team_abbrev)
+
+    def _load_news_to_frame(self, team_filter):
+        """Загрузка новостей в окно."""
+        # Очищаем фрейм
+        for widget in self.news_scrollable_frame.winfo_children():
+            widget.destroy()
+
+        # Получаем новости
+        try:
+            if team_filter == "All":
+                news_list = get_latest_news(30)
+            else:
+                news_list = get_news_by_team(team_filter, 30)
+        except Exception as e:
+            error_label = tk.Label(self.news_scrollable_frame,
+                                  text=f"Error loading news: {e}",
+                                  font=('Arial', 12), fg='#ff6b6b', bg='#1a1a2e')
+            error_label.pack(pady=20)
+            return
+
+        if not news_list:
+            no_news = tk.Label(self.news_scrollable_frame,
+                              text="No news found.\n\nClick 'Update News' to fetch latest news.",
+                              font=('Arial', 12), fg='#a0a0a0', bg='#1a1a2e')
+            no_news.pack(pady=50)
+            return
+
+        # Отображаем новости
+        for news in news_list:
+            self._create_news_card(news)
+
+    def _create_news_card(self, news):
+        """Создание карточки новости."""
+        card = tk.Frame(self.news_scrollable_frame, bg='#16213e', cursor='hand2')
+        card.pack(fill='x', padx=5, pady=5)
+
+        # Левая часть: метаданные
+        meta_frame = tk.Frame(card, bg='#16213e')
+        meta_frame.pack(fill='x', padx=10, pady=8)
+
+        # Дата
+        published = news.get('published_at', '')
+        if published:
+            try:
+                dt = datetime.strptime(str(published)[:19], '%Y-%m-%d %H:%M:%S')
+                date_str = dt.strftime('%d.%m %H:%M')
+            except:
+                date_str = str(published)[:16]
+        else:
+            date_str = "N/A"
+
+        date_label = tk.Label(meta_frame, text=date_str,
+                             font=('Arial', 9), fg='#888888', bg='#16213e')
+        date_label.pack(side='left')
+
+        # Команды (теги)
+        teams_str = news.get('teams', '')
+        if teams_str:
+            teams = teams_str.split(',')
+            for team in teams[:3]:  # Максимум 3 тега
+                team = team.strip()
+                color = TEAM_COLORS.get(team, {}).get('primary', '#555555')
+                team_tag = tk.Label(meta_frame, text=team,
+                                   font=('Arial', 8, 'bold'), fg='white', bg=color,
+                                   padx=5, pady=1)
+                team_tag.pack(side='left', padx=3)
+
+        # Автор
+        author = news.get('author', '')
+        if author:
+            author_label = tk.Label(meta_frame, text=f"• {author}",
+                                   font=('Arial', 9), fg='#666666', bg='#16213e')
+            author_label.pack(side='right')
+
+        # Заголовок
+        title = news.get('title', 'No title')
+        title_label = tk.Label(card, text=title,
+                              font=('Arial', 12, 'bold'), fg='white', bg='#16213e',
+                              wraplength=800, justify='left', anchor='w', cursor='hand2')
+        title_label.pack(fill='x', padx=10, pady=(0, 5))
+
+        # Краткое содержание (первые 200 символов)
+        content = news.get('content', '')
+        if content and len(content) > 200:
+            content = content[:200] + "..."
+
+        if content:
+            content_label = tk.Label(card, text=content,
+                                    font=('Arial', 10), fg='#a0a0a0', bg='#16213e',
+                                    wraplength=800, justify='left', anchor='w')
+            content_label.pack(fill='x', padx=10, pady=(0, 8))
+
+        # Клик открывает новость в браузере
+        url = news.get('url', '')
+        if url:
+            for widget in [card, title_label]:
+                widget.bind('<Button-1>', lambda e, u=url: webbrowser.open(u))
+
+            # Подсветка при наведении
+            def on_enter(e):
+                card.config(bg='#1e3a5f')
+                meta_frame.config(bg='#1e3a5f')
+                for child in meta_frame.winfo_children():
+                    if 'tag' not in str(child):
+                        try:
+                            child.config(bg='#1e3a5f')
+                        except:
+                            pass
+                title_label.config(bg='#1e3a5f')
+                if content:
+                    content_label.config(bg='#1e3a5f')
+
+            def on_leave(e):
+                card.config(bg='#16213e')
+                meta_frame.config(bg='#16213e')
+                for child in meta_frame.winfo_children():
+                    if 'tag' not in str(child):
+                        try:
+                            child.config(bg='#16213e')
+                        except:
+                            pass
+                title_label.config(bg='#16213e')
+                if content:
+                    content_label.config(bg='#16213e')
+
+            card.bind('<Enter>', on_enter)
+            card.bind('<Leave>', on_leave)
+
+    def _refresh_news_in_window(self, window):
+        """Обновление новостей в окне."""
+        # Показываем статус загрузки
+        loading_label = tk.Label(window, text="Updating news...",
+                                font=('Arial', 12), fg='#ffd93d', bg='#1a1a2e')
+        loading_label.place(relx=0.5, rely=0.5, anchor='center')
+        window.update()
+
+        # Запускаем парсинг в фоне
+        def fetch_news():
+            try:
+                init_database()
+                scrape_news(days=3, max_pages=5)
+                # Обновляем отображение
+                self.root.after(0, lambda: self._on_news_updated(window, loading_label))
+            except Exception as e:
+                print(f"Error fetching news: {e}")
+                self.root.after(0, lambda: loading_label.config(text=f"Error: {e}", fg='#ff6b6b'))
+
+        thread = threading.Thread(target=fetch_news, daemon=True)
+        thread.start()
+
+    def _on_news_updated(self, window, loading_label):
+        """Callback после обновления новостей."""
+        loading_label.destroy()
+        current_filter = getattr(self, 'news_filter_var', None)
+        filter_value = current_filter.get() if current_filter else "All"
+        self._load_news_to_frame(filter_value)
+
+    def update_news_in_background(self):
+        """Фоновое обновление новостей при старте приложения."""
+        def fetch():
+            try:
+                print("Запуск фонового обновления новостей...")
+                # Парсим только 2 страницы для быстроты (последние новости)
+                scrape_news(days=3, max_pages=2)
+                print("Фоновое обновление новостей завершено")
+            except Exception as e:
+                print(f"Ошибка фонового обновления новостей: {e}")
+
+        thread = threading.Thread(target=fetch, daemon=True)
+        thread.start()
 
 
 def main():

@@ -357,6 +357,7 @@ def get_team_last_n_games_stats(team_abbrev: str, n_games: int = 3, season: str 
             game_date = game_row['GAME_DATE']
             matchup = game_row['MATCHUP']
             result = game_row['WL']
+            team_pts = int(game_row['PTS']) if pd.notna(game_row['PTS']) else 0
 
             # Получаем boxscore (используем V3 - работает для сезона 2025-26)
             time.sleep(1.0)
@@ -397,6 +398,7 @@ def get_team_last_n_games_stats(team_abbrev: str, n_games: int = 3, season: str 
                 'date': game_date,
                 'matchup': matchup,
                 'result': result,
+                'team_pts': team_pts,
                 'starters': starters_stats
             })
 

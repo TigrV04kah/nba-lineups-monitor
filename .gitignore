@@ -30,3 +30,7 @@ venv/
 openaikey.txt
 *key*.txt
 *_key.txt
+
+# Database
+*.db
+news.db
