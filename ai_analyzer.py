@@ -488,15 +488,19 @@ def analyze_player_projection(
             news_text += "\n\nНовости об игроке:"
             for news in news_data['player_news'][:3]:
                 title = news.get('title', '')
-                content = news.get('content', '')[:150] if news.get('content') else ''
+                content = news.get('content', '')  # Полный текст новости
                 news_text += f"\n• {title}"
                 if content:
-                    news_text += f"\n  {content}..."
+                    news_text += f"\n  {content}"
 
         if news_data['team_news']:
             news_text += "\n\nНовости о команде:"
             for news in news_data['team_news'][:2]:
-                news_text += f"\n• {news.get('title', '')}"
+                title = news.get('title', '')
+                content = news.get('content', '')  # Полный текст новости
+                news_text += f"\n• {title}"
+                if content:
+                    news_text += f"\n  {content}"
     else:
         news_text = "\n\nАКТУАЛЬНЫЕ НОВОСТИ: За последние 3 дня релевантных новостей об этом игроке или команде не найдено."
 

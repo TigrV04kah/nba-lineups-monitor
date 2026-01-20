@@ -61,13 +61,13 @@ def match_players_by_lastname(current_names, past_names):
     return new_players, removed_players
 
 # Файл для хранения составов
-LINEUPS_CACHE_FILE = "d:/scripts/nba_lineups/lineups_cache.json"
+LINEUPS_CACHE_FILE = "lineups_cache.json"  # Сохраняем в текущую директорию
 
 # Файл для хранения исторических данных (последние игры)
-HISTORICAL_CACHE_FILE = "d:/scripts/nba_lineups/historical_cache.json"
+HISTORICAL_CACHE_FILE = "historical_cache.json"  # Сохраняем в текущую директорию
 
 # Файл для хранения статистики последних 3 игр
-TEAM_STATS_CACHE_FILE = "d:/scripts/nba_lineups/team_stats_cache.json"
+TEAM_STATS_CACHE_FILE = "team_stats_cache.json"  # Сохраняем в текущую директорию
 
 # Интервал проверки (в миллисекундах) - 3 минуты
 CHECK_INTERVAL_MS = 3 * 60 * 1000
@@ -842,38 +842,39 @@ class LineupsGUI:
         changes = []
         timestamp = datetime.now().strftime('%H:%M:%S')
 
-        for game in new_lineups:
-            game_key = self.get_game_key(game)
+        # Проверяем что new_lineups это словарь
+        if isinstance(new_lineups, dict):
+            # Итерируем по элементам словаря
+            for game_key, game in new_lineups.items():
+                if game_key not in old_lineups:
+                    continue  # Новая игра, не сравниваем
 
-            if game_key not in old_lineups:
-                continue  # Новая игра, не сравниваем
+                old_game = old_lineups[game_key]
 
-            old_game = old_lineups[game_key]
+                # Проверяем что old_game это словарь, а не строка
+                if not isinstance(old_game, dict):
+                    continue
 
-            # Проверяем что old_game это словарь, а не строка
-            if not isinstance(old_game, dict):
-                continue
+                # Сравниваем away team и home team
+                for team_type in ['away_team', 'home_team']:
+                    team_abbrev = game.get(team_type, {}).get('abbrev', '???')
+                    old_starters = self.get_starters(old_game.get(team_type, {}).get('lineup', []))
+                    new_starters = self.get_starters(game.get(team_type, {}).get('lineup', []))
 
-            # Сравниваем away team
-            for team_type in ['away_team', 'home_team']:
-                team_abbrev = game.get(team_type, {}).get('abbrev', '???')
-                old_starters = self.get_starters(old_game.get(team_type, {}).get('lineup', []))
-                new_starters = self.get_starters(game.get(team_type, {}).get('lineup', []))
+                    for pos in POSITIONS_ORDER:
+                        old_player = old_starters.get(pos, '')
+                        new_player = new_starters.get(pos, '')
 
-                for pos in POSITIONS_ORDER:
-                    old_player = old_starters.get(pos, '')
-                    new_player = new_starters.get(pos, '')
-
-                    if old_player and new_player and old_player != new_player:
-                        change = {
-                            'time': timestamp,
-                            'game': game_key,
-                            'team': team_abbrev,
-                            'position': pos,
-                            'old_player': old_player,
-                            'new_player': new_player
-                        }
-                        changes.append(change)
+                        if old_player and new_player and old_player != new_player:
+                            change = {
+                                'time': timestamp,
+                                'game': game_key,
+                                'team': team_abbrev,
+                                'position': pos,
+                                'old_player': old_player,
+                                'new_player': new_player
+                            }
+                            changes.append(change)
 
         return changes
 
@@ -1724,17 +1725,23 @@ class LineupsGUI:
     def _run_team_ai_analysis_thread(self, container, loading_label, team_abbrev, games, opponent_abbrev, current_lineup=None):
         """Фоновый AI анализ команды."""
         try:
+            print(f"[DEBUG TEAM] Начало анализа команды {team_abbrev}")
+
             if not self.ai_enabled:
+                print(f"[DEBUG TEAM] AI не включен")
                 self.root.after(0, lambda: loading_label.config(
                     text="AI анализ недоступен\n\nНастройте OPENAI_API_KEY в .env файле"))
                 return
 
+            print(f"[DEBUG TEAM] Формирование промпта...")
             # Формируем данные для анализа
             analysis_prompt = self._build_team_analysis_prompt(team_abbrev, games, opponent_abbrev, current_lineup)
+            print(f"[DEBUG TEAM] Промпт создан, длина: {len(analysis_prompt)}")
 
             # Получаем AI анализ (используем существующую функцию)
             from ai_analyzer import client
             if not client:
+                print(f"[DEBUG TEAM] Инициализация OpenAI клиента...")
                 from ai_analyzer import init_openai
                 init_openai()
 
@@ -1742,6 +1749,7 @@ class LineupsGUI:
             if not client:
                 raise Exception("AI клиент не инициализирован")
 
+            print(f"[DEBUG TEAM] Отправка запроса к OpenAI...")
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -1754,14 +1762,20 @@ class LineupsGUI:
             )
 
             analysis_text = response.choices[0].message.content
+            print(f"[DEBUG TEAM] Получен ответ от AI, длина: {len(analysis_text)}")
 
             # Обновляем UI
+            print(f"[DEBUG TEAM] Обновление UI...")
             self.root.after(0, lambda: self._display_team_analysis(container, loading_label, analysis_text))
+            print(f"[DEBUG TEAM] UI обновлен!")
 
         except Exception as e:
-            print(f"Ошибка AI анализа команды: {e}")
+            print(f"[DEBUG TEAM] Ошибка AI анализа команды: {e}")
+            import traceback
+            traceback.print_exc()
+            error_msg = str(e)[:100]
             self.root.after(0, lambda: loading_label.config(
-                text=f"Ошибка AI анализа:\n{str(e)[:100]}"))
+                text=f"Ошибка AI анализа:\n{error_msg}"))
 
     def _build_team_analysis_prompt(self, team_abbrev, games, opponent_abbrev, current_lineup=None):
         """Формирует промпт для AI анализа команды."""
@@ -1794,7 +1808,7 @@ class LineupsGUI:
 
         # Получаем новости о команде
         from news_scraper import get_news_by_team
-        team_news = get_news_by_team(team_abbrev, days=3, limit=5)
+        team_news = get_news_by_team(team_abbrev, limit=5)
 
         # Формируем промпт
         prompt = f"""Проанализируй текущий состав команды {team_abbrev} на основе последних 5 игр и актуальных новостей.
@@ -2041,6 +2055,10 @@ class LineupsGUI:
             # Распаковываем результат (analysis, prompt)
             analysis, ai_prompt = result if isinstance(result, tuple) else (result, "")
 
+            # Отладка: проверяем что передаётся
+            print(f"[DEBUG] AI prompt длина: {len(ai_prompt) if ai_prompt else 0} символов")
+            print(f"[DEBUG] AI prompt пустой: {not bool(ai_prompt)}")
+
             self.root.after(0, lambda: self._show_player_projection_popup(
                 player_name, player_position, team_abbrev, player_stats, opponent_abbrev, analysis, ai_prompt
             ))
@@ -2058,6 +2076,11 @@ class LineupsGUI:
                                       opponent_abbrev, analysis, ai_prompt=""):
         """Показ popup с прогнозом по игроку."""
         self._close_player_loading()
+
+        # Отладка
+        print(f"[DEBUG] _show_player_projection_popup вызван")
+        print(f"[DEBUG] ai_prompt длина: {len(ai_prompt) if ai_prompt else 0}")
+        print(f"[DEBUG] ai_prompt bool: {bool(ai_prompt)}")
 
         colors = TEAM_COLORS.get(team_abbrev, {'primary': '#333333', 'secondary': '#666666'})
 
