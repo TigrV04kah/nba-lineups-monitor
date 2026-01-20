@@ -147,6 +147,15 @@ def parse_game_container(container) -> dict:
                 game['away_team']['lineup'] = parse_lineup_list(lineup_lists[0])
                 game['home_team']['lineup'] = parse_lineup_list(lineup_lists[1])
 
+                # Извлекаем травмированных игроков из линапа в отдельный список
+                for player in game['away_team']['lineup']:
+                    if player.get('status') != 'active':
+                        game['away_team']['injuries'].append(player['name'])
+
+                for player in game['home_team']['lineup']:
+                    if player.get('status') != 'active':
+                        game['home_team']['injuries'].append(player['name'])
+
         # Копируем травмы на уровень игры для удобного доступа
         game['away_injuries'] = game['away_team']['injuries']
         game['home_injuries'] = game['home_team']['injuries']
@@ -191,6 +200,15 @@ def parse_game_block(block) -> dict:
             # Первый список - away team, второй - home team
             game['away_team']['lineup'] = parse_lineup_list(lineup_lists[0])
             game['home_team']['lineup'] = parse_lineup_list(lineup_lists[1])
+
+            # Извлекаем травмированных игроков из линапа в отдельный список
+            for player in game['away_team']['lineup']:
+                if player.get('status') != 'active':
+                    game['away_team']['injuries'].append(player['name'])
+
+            for player in game['home_team']['lineup']:
+                if player.get('status') != 'active':
+                    game['home_team']['injuries'].append(player['name'])
 
         # Ищем также секцию с травмированными (может быть отдельно)
         injury_sections = block.find_all(class_='lineup__inj')
