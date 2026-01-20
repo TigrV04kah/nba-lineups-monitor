@@ -75,11 +75,11 @@ CHECK_INTERVAL_MS = 3 * 60 * 1000
 # Время жизни кэша исторических данных (часы)
 HISTORICAL_CACHE_TTL_HOURS = 12
 
-# Время жизни кэша статистики команд (часы) - дольше, т.к. статистика не меняется
-TEAM_STATS_CACHE_TTL_HOURS = 24
+# Время жизни кэша статистики команд (часы)
+TEAM_STATS_CACHE_TTL_HOURS = 4
 
 # Максимальный возраст кэша составов при запуске (часы)
-LINEUPS_CACHE_MAX_AGE_HOURS = 1
+LINEUPS_CACHE_MAX_AGE_HOURS = 4
 
 # Цвета NBA команд (основные)
 TEAM_COLORS = {
@@ -157,10 +157,10 @@ class LineupsGUI:
 
         self.setup_ui()
 
-        # Если кэш устарел (>1 час), сначала показываем сообщение, потом обновляем
+        # Если кэш устарел (>4 часа), сначала показываем сообщение, потом обновляем
         if self.cache_is_stale:
-            self.status_label.config(text="Cache is stale (>1h), refreshing...", fg='#ffd93d')
-            print("Кэш устарел более чем на 1 час - запускаем обновление...")
+            self.status_label.config(text="Cache is stale (>4h), refreshing...", fg='#ffd93d')
+            print("Кэш устарел более чем на 4 часа - запускаем обновление...")
 
         self.load_data()
 
@@ -447,6 +447,15 @@ class LineupsGUI:
 
     def load_data(self):
         """Загрузка данных в фоновом потоке."""
+        # Проверяем актуальность кэша
+        if not self.cache_is_stale and self.games:
+            # Кэш свежий и игры уже загружены - используем их
+            print("Используем кэшированные составы (свежие)")
+            self._update_ui()
+            self.status_label.config(text=f"Ready ({len(self.games)} games)")
+            return
+
+        # Кэш устарел - загружаем новые данные
         self.status_label.config(text="Loading...")
         self.refresh_btn.config(state='disabled')
 
@@ -458,6 +467,11 @@ class LineupsGUI:
         try:
             soup = fetch_page(ROTOWIRE_URL)
             self.games = parse_lineups(soup)
+
+            # Помечаем кэш как свежий и сохраняем
+            self.cache_is_stale = False
+            self.save_cache()
+
             self.root.after(0, self._update_ui)
         except Exception as e:
             self.root.after(0, lambda: self.status_label.config(text=f"Error: {e}"))
@@ -632,8 +646,16 @@ class LineupsGUI:
             name_color = '#ff8c00'
 
         name_label = tk.Label(row, text=name, font=('Arial', 10),
-                             fg=name_color, bg='#1a1a2e', anchor='w')
+                             fg=name_color, bg='#1a1a2e', anchor='w', cursor='hand2')
         name_label.pack(side='left', padx=5, fill='x', expand=True)
+
+        # Добавляем обработчик клика на имя игрока для AI анализа
+        # Сохраняем данные игрока для обработчика
+        player_data = player.copy()
+        name_label.bind('<Button-1>', lambda e, p=player_data: self._on_player_click(p))
+        # Подсветка при наведении
+        name_label.bind('<Enter>', lambda e: name_label.config(fg='#4fc3f7'))
+        name_label.bind('<Leave>', lambda e: name_label.config(fg=name_color))
 
         # Статус (если не active)
         if status != 'active':
@@ -644,7 +666,9 @@ class LineupsGUI:
             status_label.pack(side='right', padx=5)
 
     def refresh_data(self):
-        """Обновление данных."""
+        """Обновление данных (принудительно, игнорируя кэш)."""
+        # Помечаем кэш как устаревший, чтобы загрузить свежие данные
+        self.cache_is_stale = True
         self.load_data()
 
     def load_cache(self):
@@ -655,6 +679,7 @@ class LineupsGUI:
                     data = json.load(f)
                     self.previous_lineups = data.get('lineups', {})
                     self.changes_log = data.get('changes_log', [])
+                    cached_games = data.get('games', [])
                     last_update_str = data.get('last_update', '')
 
                     print(f"Загружен кэш: {len(self.previous_lineups)} игр")
@@ -670,7 +695,11 @@ class LineupsGUI:
                                 self.cache_is_stale = True
                                 print(f"Кэш устарел! Последнее обновление: {last_update_str}")
                             else:
+                                # Кэш свежий - используем сохранённые составы
+                                self.games = cached_games
+                                self.cache_is_stale = False
                                 print(f"Кэш актуален. Последнее обновление: {last_update_str}")
+                                print(f"Загружено {len(self.games)} игр из кэша")
                         except ValueError as ve:
                             print(f"Ошибка парсинга даты кэша: {ve}")
                             self.cache_is_stale = True
@@ -693,11 +722,13 @@ class LineupsGUI:
         try:
             data = {
                 'lineups': self.previous_lineups,
+                'games': self.games,  # Сохраняем полные данные игр
                 'changes_log': self.changes_log[-100:],  # Храним последние 100 изменений
                 'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             with open(LINEUPS_CACHE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"Кэш сохранён: {len(self.games)} игр")
         except Exception as e:
             print(f"Ошибка сохранения кэша: {e}")
 
@@ -818,6 +849,10 @@ class LineupsGUI:
                 continue  # Новая игра, не сравниваем
 
             old_game = old_lineups[game_key]
+
+            # Проверяем что old_game это словарь, а не строка
+            if not isinstance(old_game, dict):
+                continue
 
             # Сравниваем away team
             for team_type in ['away_team', 'home_team']:
@@ -1419,12 +1454,16 @@ class LineupsGUI:
         for team_abbrev in teams:
             try:
                 # Проверяем кэш
-                if self.is_team_stats_cache_valid(team_abbrev):
+                is_valid = self.is_team_stats_cache_valid(team_abbrev)
+                if is_valid:
                     cached += 1
-                    print(f"  {team_abbrev}: из кэша ({cached + loaded}/{total})")
+                    # Получаем время кэша для отладки
+                    cached_time = self.team_stats_cache.get(team_abbrev, {}).get('cached_at', 'unknown')
+                    print(f"  {team_abbrev}: из кэша ({cached + loaded}/{total}) [кэширован: {cached_time}]")
                 else:
                     # Загружаем с API
-                    print(f"  {team_abbrev}: загрузка... ({cached + loaded}/{total})")
+                    in_cache = team_abbrev in self.team_stats_cache
+                    print(f"  {team_abbrev}: загрузка... ({cached + loaded}/{total}) [в кэше: {in_cache}]")
                     data = get_team_last_n_games_stats(team_abbrev, n_games=5, season='2025-26')
 
                     if data:
@@ -1459,10 +1498,10 @@ class LineupsGUI:
 
         colors = TEAM_COLORS.get(team_abbrev, {'primary': '#333333', 'secondary': '#666666'})
 
-        # Создаём окно
+        # Создаём окно (увеличили ширину для AI панели)
         stats_window = tk.Toplevel(self.root)
         stats_window.title(f"{team_abbrev} - Last 5 Games Stats")
-        stats_window.geometry("900x750")
+        stats_window.geometry("1300x750")
         stats_window.configure(bg='#1a1a2e')
 
         # Заголовок
@@ -1485,9 +1524,22 @@ class LineupsGUI:
                        font=('Arial', 9, 'italic'), fg='#9b59b6', bg=colors['primary'])
         hint.pack(pady=(0, 10))
 
-        # Контейнер для скролла
-        container = tk.Frame(stats_window, bg='#1a1a2e')
-        container.pack(fill='both', expand=True, padx=10, pady=10)
+        # Основной контейнер - разделим на две части
+        main_container = tk.Frame(stats_window, bg='#1a1a2e')
+        main_container.pack(fill='both', expand=True, padx=10, pady=10)
+
+        # Левая панель - статистика игроков
+        left_panel = tk.Frame(main_container, bg='#1a1a2e')
+        left_panel.pack(side='left', fill='both', expand=False)
+
+        # Правая панель - AI анализ команды
+        right_panel = tk.Frame(main_container, bg='#16213e', width=400)
+        right_panel.pack(side='right', fill='both', expand=True, padx=(10, 0))
+        right_panel.pack_propagate(False)
+
+        # Контейнер для скролла статистики
+        container = tk.Frame(left_panel, bg='#1a1a2e')
+        container.pack(fill='both', expand=True)
 
         canvas = tk.Canvas(container, bg='#1a1a2e', highlightthickness=0)
         scrollbar = ttk.Scrollbar(container, orient='vertical', command=canvas.yview)
@@ -1578,6 +1630,12 @@ class LineupsGUI:
                                   fg=col, bg='#16213e', width=w, anchor='center')
                     lbl.pack(side='left', padx=1)
 
+        # Получаем текущий состав команды на сегодня (кто играет, кто травмирован)
+        current_lineup = self._get_team_current_lineup(team_abbrev)
+
+        # Добавляем AI анализ команды в правую панель
+        self._add_team_ai_analysis(right_panel, team_abbrev, games, opponent_abbrev, colors, current_lineup)
+
         # Кнопка закрытия
         close_btn = tk.Button(stats_window, text="Close",
                              command=stats_window.destroy,
@@ -1586,12 +1644,310 @@ class LineupsGUI:
                              relief='flat', padx=30, pady=8)
         close_btn.pack(pady=15)
 
-    def _on_player_click(self, player_name, player_position, team_abbrev, games, opponent_abbrev, is_home):
-        """Обработка клика на имени игрока - запуск AI анализа."""
+    def _get_team_current_lineup(self, team_abbrev):
+        """Получает текущий состав команды на сегодня из главного окна."""
+        lineup = {'active': [], 'injured': [], 'out': []}
+
+        for game in self.games:
+            away_team = game.get('away_team', {})
+            home_team = game.get('home_team', {})
+
+            target_team = None
+            if away_team.get('abbrev') == team_abbrev:
+                target_team = away_team
+            elif home_team.get('abbrev') == team_abbrev:
+                target_team = home_team
+
+            if target_team:
+                for player in target_team.get('lineup', []):
+                    status = player.get('status', 'active')
+                    name = player.get('name', '')
+
+                    if status == 'active':
+                        lineup['active'].append(name)
+                    elif status in ['out', 'doubtful']:
+                        lineup['out'].append(name)
+                    elif status in ['questionable', 'probable']:
+                        lineup['injured'].append(name)
+
+                # Также проверяем травмированных
+                for injury in target_team.get('injuries', []):
+                    injured_name = injury.get('name', '')
+                    if injured_name and injured_name not in lineup['out']:
+                        lineup['out'].append(injured_name)
+
+                break
+
+        return lineup
+
+    def _add_team_ai_analysis(self, panel, team_abbrev, games, opponent_abbrev, colors, current_lineup=None):
+        """Добавляет AI анализ команды в правую панель."""
+        # Заголовок панели
+        ai_header = tk.Label(panel, text="🤖 Team AI Analysis",
+                            font=('Arial', 14, 'bold'), fg='#9b59b6', bg='#16213e')
+        ai_header.pack(pady=(10, 5))
+
+        # Описание
+        desc = tk.Label(panel, text="AI прогноз перераспределения нагрузки",
+                       font=('Arial', 9, 'italic'), fg='#a0a0a0', bg='#16213e')
+        desc.pack(pady=(0, 10))
+
+        # Контейнер для текста с прокруткой
+        text_frame = tk.Frame(panel, bg='#16213e')
+        text_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+        canvas = tk.Canvas(text_frame, bg='#16213e', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(text_frame, orient='vertical', command=canvas.yview)
+
+        scrollable = tk.Frame(canvas, bg='#16213e')
+        scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        canvas.create_window((0, 0), window=scrollable, anchor='nw')
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+
+        # Показываем индикатор загрузки
+        loading_label = tk.Label(scrollable, text="AI анализирует состав команды...",
+                                font=('Arial', 10), fg='#9b59b6', bg='#16213e')
+        loading_label.pack(pady=50)
+
+        # Запускаем AI анализ в фоне
+        thread = threading.Thread(
+            target=self._run_team_ai_analysis_thread,
+            args=(scrollable, loading_label, team_abbrev, games, opponent_abbrev, current_lineup),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_team_ai_analysis_thread(self, container, loading_label, team_abbrev, games, opponent_abbrev, current_lineup=None):
+        """Фоновый AI анализ команды."""
+        try:
+            if not self.ai_enabled:
+                self.root.after(0, lambda: loading_label.config(
+                    text="AI анализ недоступен\n\nНастройте OPENAI_API_KEY в .env файле"))
+                return
+
+            # Формируем данные для анализа
+            analysis_prompt = self._build_team_analysis_prompt(team_abbrev, games, opponent_abbrev, current_lineup)
+
+            # Получаем AI анализ (используем существующую функцию)
+            from ai_analyzer import client
+            if not client:
+                from ai_analyzer import init_openai
+                init_openai()
+
+            from ai_analyzer import client
+            if not client:
+                raise Exception("AI клиент не инициализирован")
+
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Ты NBA аналитик. Анализируешь составы команд и прогнозируешь перераспределение игровой нагрузки. ВАЖНО: работай ТОЛЬКО с фактическими данными из промпта. НЕ делай предположений о возможных травмах или изменениях, если они не указаны явно."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                max_tokens=400,
+                temperature=0.7,
+                timeout=30
+            )
+
+            analysis_text = response.choices[0].message.content
+
+            # Обновляем UI
+            self.root.after(0, lambda: self._display_team_analysis(container, loading_label, analysis_text))
+
+        except Exception as e:
+            print(f"Ошибка AI анализа команды: {e}")
+            self.root.after(0, lambda: loading_label.config(
+                text=f"Ошибка AI анализа:\n{str(e)[:100]}"))
+
+    def _build_team_analysis_prompt(self, team_abbrev, games, opponent_abbrev, current_lineup=None):
+        """Формирует промпт для AI анализа команды."""
+        # Собираем статистику стартовых пятерок
+        starters_stats = {}
+
+        for game_idx, game in enumerate(games[:5], 1):
+            for starter in game.get('starters', []):
+                name = starter['name']
+                if name not in starters_stats:
+                    starters_stats[name] = {
+                        'games': [],
+                        'avg_pts': 0,
+                        'avg_min': 0
+                    }
+
+                starters_stats[name]['games'].append({
+                    'pts': starter.get('pts', 0),
+                    'min': starter.get('min', '0'),
+                    'matchup': game.get('matchup', 'N/A')
+                })
+
+        # Вычисляем средние показатели
+        for name, data in starters_stats.items():
+            total_pts = sum(g['pts'] for g in data['games'])
+            data['avg_pts'] = total_pts / len(data['games']) if data['games'] else 0
+
+        # Сортируем по средним очкам
+        sorted_players = sorted(starters_stats.items(), key=lambda x: x[1]['avg_pts'], reverse=True)
+
+        # Получаем новости о команде
+        from news_scraper import get_news_by_team
+        team_news = get_news_by_team(team_abbrev, days=3, limit=5)
+
+        # Формируем промпт
+        prompt = f"""Проанализируй текущий состав команды {team_abbrev} на основе последних 5 игр и актуальных новостей.
+
+СТАТИСТИКА ОСНОВНЫХ ИГРОКОВ (последние 5 игр, по средним очкам):
+"""
+        for name, stats in sorted_players[:7]:
+            prompt += f"\n- {name}: {stats['avg_pts']:.1f} очков/игру"
+
+        # Добавляем информацию о текущем составе (кто травмирован)
+        if current_lineup:
+            if current_lineup['out']:
+                prompt += f"\n\n⚠️ ВЫБЫВШИЕ ИГРОКИ НА СЕГОДНЯ:"
+                for player in current_lineup['out']:
+                    # Проверяем, был ли этот игрок ключевым
+                    is_key = any(player == name for name, _ in sorted_players[:3])
+                    marker = " (КЛЮЧЕВОЙ ИГРОК!)" if is_key else ""
+                    prompt += f"\n- {player}{marker}"
+
+            if current_lineup['injured']:
+                prompt += f"\n\n🤕 ПОД ВОПРОСОМ:"
+                for player in current_lineup['injured']:
+                    prompt += f"\n- {player}"
+
+        # Добавляем новости
+        if team_news:
+            prompt += f"\n\nАКТУАЛЬНЫЕ НОВОСТИ О КОМАНДЕ (последние 3 дня):"
+            for news in team_news[:3]:
+                title = news.get('title', '')
+                prompt += f"\n• {title}"
+        else:
+            prompt += f"\n\nАКТУАЛЬНЫЕ НОВОСТИ: Актуальных новостей нет"
+
+        if opponent_abbrev:
+            prompt += f"\n\nСЛЕДУЮЩИЙ СОПЕРНИК: {opponent_abbrev}"
+
+        prompt += f"""
+
+ЗАДАЧА:
+1. **Анализ текущего состава**:
+   - Определи ключевых игроков (топ-2 по очкам)
+   - ЕСЛИ есть выбывшие ключевые игроки → проанализируй КТО возьмет на себя их нагрузку
+   - Используй ТОЛЬКО РЕАЛЬНЫЕ данные о травмах выше
+
+2. **Перераспределение нагрузки**:
+   - Если ключевой игрок выбыл → кто из АКТИВНЫХ игроков получит больше бросков?
+   - На сколько увеличится нагрузка на оставшихся лидеров? (конкретные проценты/очки)
+
+3. **Прогноз на игру**:
+   - Как выбывшие повлияют на результат команды?
+   - Сильно ли это ослабит команду или есть глубокая скамейка?
+
+⚠️ КРИТИЧЕСКИ ВАЖНО - РАБОТАЙ ТОЛЬКО С ФАКТАМИ:
+- ЕСЛИ в данных НЕТ информации о выбывших игроках → НЕ ПИШИ о травмах и заменах
+- ЕСЛИ нет актуальных новостей → просто укажи "новостей нет", НЕ предполагай ничего
+- ЕСЛИ состав ПОЛНЫЙ и без изменений → так и напиши "состав без изменений"
+- НЕ делай абстрактных предположений типа "если кто-то выбудет" - пиши только о реальных фактах
+- Работай ТОЛЬКО с теми данными, которые указаны выше в промпте
+
+Ответ на русском, структурированно, КОНКРЕТНО (с цифрами), максимум 350 слов."""
+
+        return prompt
+
+    def _display_team_analysis(self, container, loading_label, analysis_text):
+        """Отображает результат AI анализа."""
+        loading_label.destroy()
+
+        text_widget = tk.Text(container, wrap='word', font=('Arial', 10),
+                             bg='#16213e', fg='white', relief='flat',
+                             padx=10, pady=10, height=30)
+        text_widget.pack(fill='both', expand=True)
+        text_widget.insert('1.0', analysis_text)
+        text_widget.config(state='disabled')
+
+    def _handle_main_window_player_click(self, player):
+        """Обработка клика на игрока из главного окна."""
+        # Извлекаем данные из player dict
+        player_name = player.get('name', 'Unknown')
+        player_position = player.get('position', '?')
+
+        # Находим команду игрока и соперника из текущих игр
+        team_abbrev = None
+        opponent_abbrev = None
+        is_home = None
+        team_injuries = []
+
+        for game in self.games:
+            away_team = game.get('away_team', {})
+            home_team = game.get('home_team', {})
+
+            # Проверяем гостевую команду
+            for p in away_team.get('lineup', []):
+                if p.get('name') == player_name:
+                    team_abbrev = away_team.get('abbrev')
+                    opponent_abbrev = home_team.get('abbrev')
+                    is_home = False
+                    # Извлекаем травмированных игроков гостевой команды
+                    team_injuries = game.get('away_injuries', [])
+                    break
+
+            # Проверяем домашнюю команду
+            if not team_abbrev:
+                for p in home_team.get('lineup', []):
+                    if p.get('name') == player_name:
+                        team_abbrev = home_team.get('abbrev')
+                        opponent_abbrev = away_team.get('abbrev')
+                        is_home = True
+                        # Извлекаем травмированных игроков домашней команды
+                        team_injuries = game.get('home_injuries', [])
+                        break
+
+            if team_abbrev:
+                break
+
+        if not team_abbrev:
+            messagebox.showerror("Ошибка", f"Не удалось найти команду для игрока {player_name}")
+            return
+
+        # Получаем статистику команды из кеша
+        team_data = self.team_stats_cache.get(team_abbrev, {})
+        team_games = team_data.get('games', [])
+
+        if not team_games:
+            # Если нет в кеше - загружаем
+            messagebox.showinfo("Загрузка данных",
+                              f"Загружаю статистику {team_abbrev}...\nПожалуйста, подождите.")
+            team_stats = get_team_last_n_games_stats(team_abbrev, n_games=5)
+            team_games = team_stats.get('games', [])
+            self.team_stats_cache[team_abbrev] = {'games': team_games}
+
+        # Вызываем основную функцию анализа
+        self._on_player_click(player_name, player_position, team_abbrev, team_games, opponent_abbrev, is_home, team_injuries)
+
+    def _on_player_click(self, *args):
+        """Обработка клика на имени игрока - запуск AI анализа.
+
+        Может быть вызвана двумя способами:
+        1. Из окна статистики команды: (player_name, player_position, team_abbrev, games, opponent_abbrev, is_home, team_injuries)
+        2. Из главного окна составов: (player_dict,)
+        """
         if not self.ai_enabled:
             messagebox.showwarning("AI недоступен",
                                    "AI анализ недоступен.\n\nСоздайте файл .env с вашим OpenAI API ключом:\nOPENAI_API_KEY=sk-...")
             return
+
+        # Определяем откуда вызвана функция
+        if len(args) == 1 and isinstance(args[0], dict):
+            # Вызов из главного окна - получаем данные игрока
+            self._handle_main_window_player_click(args[0])
+            return
+
+        # Вызов из окна статистики команды
+        player_name, player_position, team_abbrev, games, opponent_abbrev, is_home, team_injuries = args if len(args) == 7 else (*args, [])
 
         # Собираем статистику игрока из всех игр
         player_stats = []
@@ -1600,6 +1956,7 @@ class LineupsGUI:
                 if starter['name'] == player_name:
                     player_stats.append({
                         'matchup': game.get('matchup', 'N/A'),
+                        'date': game.get('date', ''),
                         'pts': starter.get('pts', 0),
                         'reb': starter.get('reb', 0),
                         'ast': starter.get('ast', 0),
@@ -1642,7 +1999,7 @@ class LineupsGUI:
         # Запускаем анализ в фоне
         thread = threading.Thread(
             target=self._run_player_analysis_thread,
-            args=(player_name, player_position, team_abbrev, player_stats, opponent_abbrev, opponent_stats, is_home),
+            args=(player_name, player_position, team_abbrev, player_stats, opponent_abbrev, opponent_stats, is_home, team_injuries, games),
             daemon=True
         )
         thread.start()
@@ -1656,21 +2013,36 @@ class LineupsGUI:
             self.root.after(400, self._animate_player_loading)
 
     def _run_player_analysis_thread(self, player_name, player_position, team_abbrev, player_stats,
-                                    opponent_abbrev, opponent_stats, is_home):
+                                    opponent_abbrev, opponent_stats, is_home, team_injuries=None, team_games=None):
         """Фоновый AI анализ игрока."""
         try:
-            analysis = analyze_player_projection(
+            # Извлекаем имена травмированных игроков
+            injuries_list = []
+            if team_injuries:
+                if isinstance(team_injuries, list):
+                    for inj in team_injuries:
+                        if isinstance(inj, dict):
+                            injuries_list.append(inj.get('name', ''))
+                        else:
+                            injuries_list.append(str(inj))
+
+            result = analyze_player_projection(
                 player_name=player_name,
                 player_position=player_position,
                 team_abbrev=team_abbrev,
                 player_stats=player_stats,
                 opponent_abbrev=opponent_abbrev or "N/A",
                 opponent_stats=opponent_stats,
-                is_home=is_home if is_home is not None else True
+                is_home=is_home if is_home is not None else True,
+                team_injuries=[inj for inj in injuries_list if inj],
+                team_games=team_games
             )
 
+            # Распаковываем результат (analysis, prompt)
+            analysis, ai_prompt = result if isinstance(result, tuple) else (result, "")
+
             self.root.after(0, lambda: self._show_player_projection_popup(
-                player_name, player_position, team_abbrev, player_stats, opponent_abbrev, analysis
+                player_name, player_position, team_abbrev, player_stats, opponent_abbrev, analysis, ai_prompt
             ))
 
         except Exception as e:
@@ -1683,7 +2055,7 @@ class LineupsGUI:
             self.player_loading_window.destroy()
 
     def _show_player_projection_popup(self, player_name, player_position, team_abbrev, player_stats,
-                                      opponent_abbrev, analysis):
+                                      opponent_abbrev, analysis, ai_prompt=""):
         """Показ popup с прогнозом по игроку."""
         self._close_player_loading()
 
@@ -1693,6 +2065,9 @@ class LineupsGUI:
         popup.title(f"AI Projection - {player_name}")
         popup.geometry("550x600")
         popup.configure(bg='#1a1a2e')
+
+        # Сохраняем промпт для кнопки
+        self.last_ai_prompt = ai_prompt
 
         # Заголовок
         header_frame = tk.Frame(popup, bg=colors['primary'])
@@ -1741,10 +2116,65 @@ class LineupsGUI:
         text_widget.insert('1.0', analysis)
         text_widget.config(state='disabled')
 
+        # Кнопки внизу
+        buttons_frame = tk.Frame(popup, bg='#1a1a2e')
+        buttons_frame.pack(pady=15)
+
+        # Кнопка показа промпта
+        if ai_prompt:
+            show_prompt_btn = tk.Button(buttons_frame, text="Show AI Prompt",
+                                       command=lambda: self._show_ai_prompt_window(ai_prompt, player_name),
+                                       bg='#2c3e50', fg='white',
+                                       font=('Arial', 9),
+                                       relief='flat', padx=15, pady=6)
+            show_prompt_btn.pack(side='left', padx=5)
+
         # Кнопка закрытия
-        close_btn = tk.Button(popup, text="Close",
+        close_btn = tk.Button(buttons_frame, text="Close",
                              command=popup.destroy,
                              bg=colors['primary'], fg='white',
+                             font=('Arial', 11, 'bold'),
+                             relief='flat', padx=30, pady=8)
+        close_btn.pack(side='left', padx=5)
+
+    def _show_ai_prompt_window(self, prompt_text, player_name):
+        """Показ окна с AI промптом для отладки."""
+        prompt_window = tk.Toplevel(self.root)
+        prompt_window.title(f"AI Prompt - {player_name}")
+        prompt_window.geometry("800x700")
+        prompt_window.configure(bg='#1a1a2e')
+
+        # Заголовок
+        header = tk.Label(prompt_window, text=f"AI Prompt для {player_name}",
+                         font=('Arial', 14, 'bold'), fg='#9b59b6', bg='#1a1a2e')
+        header.pack(pady=15)
+
+        desc = tk.Label(prompt_window, text="Все данные, которые передаются в GPT-4o-mini:",
+                       font=('Arial', 10, 'italic'), fg='#a0a0a0', bg='#1a1a2e')
+        desc.pack(pady=(0, 10))
+
+        # Текстовое поле с промптом и скроллом
+        text_frame = tk.Frame(prompt_window, bg='#16213e')
+        text_frame.pack(fill='both', expand=True, padx=20, pady=10)
+
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side='right', fill='y')
+
+        text_widget = tk.Text(text_frame, wrap='word', font=('Courier New', 9),
+                             bg='#16213e', fg='#00ff00',
+                             yscrollcommand=scrollbar.set,
+                             padx=15, pady=15)
+        text_widget.pack(fill='both', expand=True)
+        scrollbar.config(command=text_widget.yview)
+
+        # Вставляем промпт
+        text_widget.insert('1.0', prompt_text)
+        text_widget.config(state='disabled')
+
+        # Кнопка закрытия
+        close_btn = tk.Button(prompt_window, text="Close",
+                             command=prompt_window.destroy,
+                             bg='#2c3e50', fg='white',
                              font=('Arial', 11, 'bold'),
                              relief='flat', padx=30, pady=8)
         close_btn.pack(pady=15)

@@ -9,6 +9,28 @@ import pandas as pd
 from datetime import datetime
 import json
 import re
+import urllib3
+import os
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения из .env
+load_dotenv()
+
+# Отключаем предупреждения о непроверенных SSL сертификатах
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Получаем прокси из переменных окружения
+PROXY_HTTP = os.getenv('PROXY_HTTP')
+PROXY_HTTPS = os.getenv('PROXY_HTTPS')
+
+# Настройка прокси для requests
+PROXIES = None
+if PROXY_HTTP and PROXY_HTTPS:
+    PROXIES = {
+        'http': PROXY_HTTP,
+        'https': PROXY_HTTPS
+    }
+    print(f"[INFO] Используется прокси: {PROXY_HTTP.split('@')[1] if '@' in PROXY_HTTP else PROXY_HTTP}")
 
 # URL страницы с составами
 ROTOWIRE_URL = "https://www.rotowire.com/basketball/nba-lineups.php"
@@ -27,9 +49,23 @@ HEADERS = {
 
 def fetch_page(url: str) -> BeautifulSoup:
     """Загрузка и парсинг страницы."""
-    response = requests.get(url, headers=HEADERS)
-    response.raise_for_status()
-    return BeautifulSoup(response.text, 'html.parser')
+    try:
+        # Добавляем timeout, verify=False и прокси если доступен
+        response = requests.get(url, headers=HEADERS, timeout=30, verify=False, proxies=PROXIES)
+        response.raise_for_status()
+        return BeautifulSoup(response.text, 'html.parser')
+    except requests.exceptions.SSLError as e:
+        print(f"SSL Error при подключении к {url}: {e}")
+        # Пробуем еще раз без проверки сертификата
+        response = requests.get(url, headers=HEADERS, timeout=30, verify=False, proxies=PROXIES)
+        response.raise_for_status()
+        return BeautifulSoup(response.text, 'html.parser')
+    except requests.exceptions.ConnectionError as e:
+        print(f"Connection Error при подключении к {url}: {e}")
+        raise Exception(f"Не удалось подключиться к {url}. Проверьте интернет-соединение или настройки прокси.")
+    except Exception as e:
+        print(f"Error при загрузке {url}: {e}")
+        raise
 
 
 def parse_lineups(soup: BeautifulSoup) -> list:
@@ -76,6 +112,8 @@ def parse_game_container(container) -> dict:
             'game_time': None,
             'away_team': {'abbrev': None, 'record': None, 'lineup': [], 'injuries': []},
             'home_team': {'abbrev': None, 'record': None, 'lineup': [], 'injuries': []},
+            'away_injuries': [],  # Для удобного доступа
+            'home_injuries': [],  # Для удобного доступа
         }
 
         # Время игры (класс lineup__time в lineup__meta)
@@ -108,6 +146,10 @@ def parse_game_container(container) -> dict:
                 # Первый список - away team, второй - home team
                 game['away_team']['lineup'] = parse_lineup_list(lineup_lists[0])
                 game['home_team']['lineup'] = parse_lineup_list(lineup_lists[1])
+
+        # Копируем травмы на уровень игры для удобного доступа
+        game['away_injuries'] = game['away_team']['injuries']
+        game['home_injuries'] = game['home_team']['injuries']
 
         return game
 
