@@ -607,7 +607,7 @@ def get_relevant_news_for_analysis(player_name: str, team_abbrev: str, opponent_
         if find_player_in_text(player_name, text):
             player_news.append({
                 'title': news_dict.get('title', ''),
-                'content': news_dict.get('content', '')[:300] if news_dict.get('content') else '',
+                'content': news_dict.get('content', ''),  # Полный текст новости
                 'date': news_dict.get('published_at', ''),
                 'url': news_dict.get('url', '')
             })
@@ -615,7 +615,7 @@ def get_relevant_news_for_analysis(player_name: str, team_abbrev: str, opponent_
         elif team_abbrev and team_abbrev in teams_in_news:
             team_news.append({
                 'title': news_dict.get('title', ''),
-                'content': news_dict.get('content', '')[:200] if news_dict.get('content') else '',
+                'content': news_dict.get('content', ''),  # Полный текст новости
                 'date': news_dict.get('published_at', '')
             })
         # Новости о сопернике
