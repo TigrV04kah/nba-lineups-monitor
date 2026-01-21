@@ -148,12 +148,14 @@ def parse_game_container(container) -> dict:
                 game['home_team']['lineup'] = parse_lineup_list(lineup_lists[1])
 
                 # Извлекаем травмированных игроков из линапа в отдельный список
+                # Только OUT и DOUBTFUL считаются реальными травмами
+                # PROBABLE и QUESTIONABLE - игрок скорее всего будет играть
                 for player in game['away_team']['lineup']:
-                    if player.get('status') != 'active':
+                    if player.get('status') in ['out', 'doubtful']:
                         game['away_team']['injuries'].append(player['name'])
 
                 for player in game['home_team']['lineup']:
-                    if player.get('status') != 'active':
+                    if player.get('status') in ['out', 'doubtful']:
                         game['home_team']['injuries'].append(player['name'])
 
         # Копируем травмы на уровень игры для удобного доступа
