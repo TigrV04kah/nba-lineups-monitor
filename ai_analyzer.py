@@ -425,15 +425,25 @@ def analyze_player_projection(
     # Форматируем статистику игрока
     player_stats_text = ""
     if player_stats:
-        avg_pts = sum(g.get('pts', 0) for g in player_stats) / len(player_stats)
-        avg_reb = sum(g.get('reb', 0) for g in player_stats) / len(player_stats)
-        avg_ast = sum(g.get('ast', 0) for g in player_stats) / len(player_stats)
-        avg_min = sum(parse_minutes(g.get('min')) for g in player_stats) / len(player_stats)
-        avg_stl = sum(g.get('stl', 0) for g in player_stats) / len(player_stats)
-        avg_blk = sum(g.get('blk', 0) for g in player_stats) / len(player_stats)
+        # Считаем средние только по играм где игрок НЕ был травмирован
+        played_games = [g for g in player_stats if not g.get('injured', False)]
+        injured_games = [g for g in player_stats if g.get('injured', False)]
+
+        if played_games:
+            avg_pts = sum(g.get('pts', 0) for g in played_games) / len(played_games)
+            avg_reb = sum(g.get('reb', 0) for g in played_games) / len(played_games)
+            avg_ast = sum(g.get('ast', 0) for g in played_games) / len(played_games)
+            avg_min = sum(parse_minutes(g.get('min')) for g in played_games) / len(played_games)
+            avg_stl = sum(g.get('stl', 0) for g in played_games) / len(played_games)
+            avg_blk = sum(g.get('blk', 0) for g in played_games) / len(played_games)
+
+            games_played_note = f" (из {len(player_stats)} последних игр команды, играл в {len(played_games)})"
+        else:
+            avg_pts = avg_reb = avg_ast = avg_min = avg_stl = avg_blk = 0
+            games_played_note = " (игрок не играл в последних 5 играх - ТРАВМА)"
 
         player_stats_text = f"""
-СРЕДНЯЯ СТАТИСТИКА ЗА 5 ИГР:
+СРЕДНЯЯ СТАТИСТИКА{games_played_note}:
 - Минуты: {avg_min:.1f}
 - Очки: {avg_pts:.1f}
 - Подборы: {avg_reb:.1f}
@@ -441,19 +451,25 @@ def analyze_player_projection(
 - Перехваты: {avg_stl:.1f}
 - Блоки: {avg_blk:.1f}
 
-ПОСЛЕДНИЕ 5 ИГР (от самой последней к более ранним - игра #1 это ПОСЛЕДНЯЯ сыгранная):"""
+ПОСЛЕДНИЕ 5 ИГР КОМАНДЫ (от самой последней к более ранним - игра #1 это ПОСЛЕДНЯЯ):"""
         for i, game in enumerate(player_stats, 1):
             matchup = game.get('matchup', 'N/A')
             game_date = game.get('date', '')
-            pts = game.get('pts', 0)
-            reb = game.get('reb', 0)
-            ast = game.get('ast', 0)
-            mins = game.get('min', 'N/A')
-            is_starter = game.get('is_starter', True)
+            is_injured = game.get('injured', False)
 
-            # Явно указываем если игрок выходил со скамейки
-            bench_marker = "" if is_starter else " [СО СКАМЕЙКИ]"
-            player_stats_text += f"\n  {i}. [{game_date}] {matchup}: {pts}pts, {reb}reb, {ast}ast ({mins}мин){bench_marker}"
+            if is_injured:
+                # Игрок был травмирован в этой игре
+                player_stats_text += f"\n  {i}. [{game_date}] {matchup}: ❌ НЕ ИГРАЛ (ТРАВМА)"
+            else:
+                pts = game.get('pts', 0)
+                reb = game.get('reb', 0)
+                ast = game.get('ast', 0)
+                mins = game.get('min', 'N/A')
+                is_starter = game.get('is_starter', True)
+
+                # Явно указываем если игрок выходил со скамейки
+                bench_marker = "" if is_starter else " [СО СКАМЕЙКИ]"
+                player_stats_text += f"\n  {i}. [{game_date}] {matchup}: {pts}pts, {reb}reb, {ast}ast ({mins}мин){bench_marker}"
 
     # Форматируем информацию о сопернике
     opponent_text = ""
@@ -672,7 +688,8 @@ def analyze_player_projection(
 3. АНОМАЛИИ (>40% от среднего) не должны искажать тренд - помечай их отдельно.
 4. БАЗА прогноза = среднее за 3 игры с корректировками (соперник ±10-15%, травмы +5-10%, тренд ±5-10%).
 5. Диапазон прогноза должен быть узким (4-6 очков), не размывай.
-6. НЕ делай предположений о возможных выбытиях - работай только с фактами."""},
+6. НЕ делай предположений о возможных выбытиях - работай только с фактами.
+7. ТРАВМЫ: если игрок пропустил игру (помечено как "НЕ ИГРАЛ (ТРАВМА)") - учитывай это как важный фактор. Игрок после травмы может быть не в форме или наоборот хорошо отдохнул."""},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=900,

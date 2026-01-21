@@ -1999,8 +1999,10 @@ class LineupsGUI:
         player_name, player_position, team_abbrev, games, opponent_abbrev, is_home, team_injuries = args if len(args) == 7 else (*args, [])
 
         # Собираем статистику игрока из всех игр
+        # Если игрок не найден в игре - значит был травмирован
         player_stats = []
-        for game in games:
+        for game_idx, game in enumerate(games, 1):
+            player_found = False
             for starter in game.get('starters', []):
                 if starter['name'] == player_name:
                     player_stats.append({
@@ -2011,9 +2013,25 @@ class LineupsGUI:
                         'ast': starter.get('ast', 0),
                         'stl': starter.get('stl', 0),
                         'blk': starter.get('blk', 0),
-                        'min': starter.get('min', 0)  # Передаём как есть (строка "MM:SS"), парсинг в ai_analyzer
+                        'min': starter.get('min', 0),  # Передаём как есть (строка "MM:SS"), парсинг в ai_analyzer
+                        'injured': False
                     })
+                    player_found = True
                     break
+
+            # Если игрок не найден в этой игре - был травмирован
+            if not player_found:
+                player_stats.append({
+                    'matchup': game.get('matchup', 'N/A'),
+                    'date': game.get('date', ''),
+                    'pts': 0,
+                    'reb': 0,
+                    'ast': 0,
+                    'stl': 0,
+                    'blk': 0,
+                    'min': 0,
+                    'injured': True  # Флаг травмы
+                })
 
         # Показываем окно загрузки
         self.player_loading_window = tk.Toplevel(self.root)
