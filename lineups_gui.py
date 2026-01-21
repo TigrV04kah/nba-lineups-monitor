@@ -652,10 +652,16 @@ class LineupsGUI:
         # Добавляем обработчик клика на имя игрока для AI анализа
         # Сохраняем данные игрока для обработчика
         player_data = player.copy()
-        name_label.bind('<Button-1>', lambda e, p=player_data: self._on_player_click(p))
+        def on_click(event, p=player_data):
+            self._on_player_click(p)
+        name_label.bind('<Button-1>', on_click)
         # Подсветка при наведении
-        name_label.bind('<Enter>', lambda e: name_label.config(fg='#4fc3f7'))
-        name_label.bind('<Leave>', lambda e: name_label.config(fg=name_color))
+        def on_enter(event, lbl=name_label):
+            lbl.config(fg='#4fc3f7')
+        def on_leave(event, lbl=name_label, color=name_color):
+            lbl.config(fg=color)
+        name_label.bind('<Enter>', on_enter)
+        name_label.bind('<Leave>', on_leave)
 
         # Статус (если не active)
         if status != 'active':
@@ -1499,6 +1505,12 @@ class LineupsGUI:
 
         colors = TEAM_COLORS.get(team_abbrev, {'primary': '#333333', 'secondary': '#666666'})
 
+        # Получаем текущий состав для передачи в _on_player_click
+        # team_injuries = только OUT/DOUBTFUL (не играют)
+        # PROBABLE/QUESTIONABLE считаем что будут играть
+        current_lineup = self._get_team_current_lineup(team_abbrev)
+        team_injuries = current_lineup.get('out', [])
+
         # Создаём окно (увеличили ширину для AI панели)
         stats_window = tk.Toplevel(self.root)
         stats_window.title(f"{team_abbrev} - Last 5 Games Stats")
@@ -1610,8 +1622,8 @@ class LineupsGUI:
                 name_lbl.pack(side='left', padx=1)
 
                 # Привязываем клик к имени
-                name_lbl.bind('<Button-1>', lambda e, pn=player_name, pp=player_position, ta=team_abbrev, g=games, oa=opponent_abbrev, ih=is_home:
-                             self._on_player_click(pn, pp, ta, g, oa, ih))
+                name_lbl.bind('<Button-1>', lambda e, pn=player_name, pp=player_position, ta=team_abbrev, g=games, oa=opponent_abbrev, ih=is_home, ti=team_injuries:
+                             self._on_player_click(pn, pp, ta, g, oa, ih, ti))
                 name_lbl.bind('<Enter>', lambda e, lbl=name_lbl: lbl.config(fg='#c39bd3'))
                 name_lbl.bind('<Leave>', lambda e, lbl=name_lbl: lbl.config(fg='#9b59b6'))
 
@@ -1673,7 +1685,11 @@ class LineupsGUI:
 
                 # Также проверяем травмированных
                 for injury in target_team.get('injuries', []):
-                    injured_name = injury.get('name', '')
+                    # injury может быть строкой или словарём
+                    if isinstance(injury, dict):
+                        injured_name = injury.get('name', '')
+                    else:
+                        injured_name = str(injury) if injury else ''
                     if injured_name and injured_name not in lineup['out']:
                         lineup['out'].append(injured_name)
 
@@ -1893,7 +1909,7 @@ class LineupsGUI:
         team_abbrev = None
         opponent_abbrev = None
         is_home = None
-        team_injuries = []
+        team_injuries = []  # Только OUT игроки (не probable/questionable)
 
         for game in self.games:
             away_team = game.get('away_team', {})
@@ -1905,8 +1921,11 @@ class LineupsGUI:
                     team_abbrev = away_team.get('abbrev')
                     opponent_abbrev = home_team.get('abbrev')
                     is_home = False
-                    # Извлекаем травмированных игроков гостевой команды
-                    team_injuries = game.get('away_injuries', [])
+                    # Извлекаем ТОЛЬКО OUT игроков (не probable/questionable - они играют)
+                    team_injuries = [
+                        p.get('name') for p in away_team.get('lineup', [])
+                        if p.get('status') in ['out', 'doubtful']
+                    ]
                     break
 
             # Проверяем домашнюю команду
@@ -1916,8 +1935,11 @@ class LineupsGUI:
                         team_abbrev = home_team.get('abbrev')
                         opponent_abbrev = away_team.get('abbrev')
                         is_home = True
-                        # Извлекаем травмированных игроков домашней команды
-                        team_injuries = game.get('home_injuries', [])
+                        # Извлекаем ТОЛЬКО OUT игроков (не probable/questionable - они играют)
+                        team_injuries = [
+                            p.get('name') for p in home_team.get('lineup', [])
+                            if p.get('status') in ['out', 'doubtful']
+                        ]
                         break
 
             if team_abbrev:
@@ -1963,20 +1985,43 @@ class LineupsGUI:
         # Вызов из окна статистики команды
         player_name, player_position, team_abbrev, games, opponent_abbrev, is_home, team_injuries = args if len(args) == 7 else (*args, [])
 
-        # Собираем статистику игрока из всех игр
+        # Собираем статистику игрока из всех игр (стартеры + скамейка)
         player_stats = []
+
+        # Извлекаем фамилию для сравнения (D. Mitchell -> Mitchell, Donovan Mitchell -> Mitchell)
+        def get_last_name(name):
+            parts = name.replace('.', '').split()
+            return parts[-1].lower() if parts else ''
+
+        player_last_name = get_last_name(player_name)
+
         for game in games:
-            for starter in game.get('starters', []):
-                if starter['name'] == player_name:
+            # Ищем сначала в стартерах, потом в скамейке (all_players содержит всех)
+            all_players = game.get('all_players', game.get('starters', []))
+
+            for player in all_players:
+                p_name = player.get('name', '')
+                p_last_name = get_last_name(p_name)
+
+                if p_last_name == player_last_name:
+                    # Определяем был ли игрок стартером
+                    is_starter = player.get('is_starter', True)  # По умолчанию True для обратной совместимости
+
+                    # Если нет флага is_starter, проверяем по списку стартеров
+                    if 'is_starter' not in player:
+                        starter_names = [get_last_name(s.get('name', '')) for s in game.get('starters', [])]
+                        is_starter = p_last_name in starter_names
+
                     player_stats.append({
                         'matchup': game.get('matchup', 'N/A'),
                         'date': game.get('date', ''),
-                        'pts': starter.get('pts', 0),
-                        'reb': starter.get('reb', 0),
-                        'ast': starter.get('ast', 0),
-                        'stl': starter.get('stl', 0),
-                        'blk': starter.get('blk', 0),
-                        'min': starter.get('min', 0)  # Передаём как есть (строка "MM:SS"), парсинг в ai_analyzer
+                        'pts': player.get('pts', 0),
+                        'reb': player.get('reb', 0),
+                        'ast': player.get('ast', 0),
+                        'stl': player.get('stl', 0),
+                        'blk': player.get('blk', 0),
+                        'min': player.get('min', 0),
+                        'is_starter': is_starter,  # Добавляем флаг стартер/скамейка
                     })
                     break
 

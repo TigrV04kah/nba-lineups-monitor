@@ -424,14 +424,22 @@ def get_team_last_n_games_stats(team_abbrev: str, n_games: int = 3, season: str 
             boxscore = boxscoretraditionalv3.BoxScoreTraditionalV3(game_id=game_id)
             player_df = boxscore.get_data_frames()[0]
 
-            # Фильтруем стартеров нашей команды (V3 использует 'teamTricode' и 'position')
+            # Фильтруем игроков нашей команды (V3 использует 'teamTricode' и 'position')
             team_players = player_df[player_df['teamTricode'] == team_abbrev]
             # В V3 стартеры - это те у кого position не пустая (F, C, G)
-            starters = team_players[team_players['position'] != '']
+            starters_df = team_players[team_players['position'] != '']
+            bench_df = team_players[team_players['position'] == '']
+
+            # Собираем имена стартеров для проверки
+            starter_names = set()
+            for _, row in starters_df.iterrows():
+                starter_names.add(f"{row['firstName']} {row['familyName']}")
 
             starters_stats = []
-            for _, row in starters.iterrows():
-                # V3 использует другие названия колонок (camelCase)
+            bench_stats = []
+
+            # Стартеры
+            for _, row in starters_df.iterrows():
                 player_name = f"{row['firstName']} {row['familyName']}"
                 starters_stats.append({
                     'name': player_name,
@@ -447,9 +455,34 @@ def get_team_last_n_games_stats(team_abbrev: str, n_games: int = 3, season: str 
                     'fg3m': int(row['threePointersMade']) if pd.notna(row['threePointersMade']) else 0,
                     'fg3a': int(row['threePointersAttempted']) if pd.notna(row['threePointersAttempted']) else 0,
                     'to': int(row['turnovers']) if pd.notna(row['turnovers']) else 0,
+                    'is_starter': True,
                 })
 
-            # Сортируем по позиции (G -> F -> C) и затем по имени
+            # Скамейка (только те кто играл - минуты > 0)
+            for _, row in bench_df.iterrows():
+                mins = row['minutes']
+                # Пропускаем игроков которые не играли
+                if not mins or mins == '0:00' or mins == 'PT00M00.00S':
+                    continue
+                player_name = f"{row['firstName']} {row['familyName']}"
+                bench_stats.append({
+                    'name': player_name,
+                    'position': 'BENCH',  # Помечаем как скамейку
+                    'min': mins,
+                    'pts': int(row['points']) if pd.notna(row['points']) else 0,
+                    'reb': int(row['reboundsTotal']) if pd.notna(row['reboundsTotal']) else 0,
+                    'ast': int(row['assists']) if pd.notna(row['assists']) else 0,
+                    'stl': int(row['steals']) if pd.notna(row['steals']) else 0,
+                    'blk': int(row['blocks']) if pd.notna(row['blocks']) else 0,
+                    'fgm': int(row['fieldGoalsMade']) if pd.notna(row['fieldGoalsMade']) else 0,
+                    'fga': int(row['fieldGoalsAttempted']) if pd.notna(row['fieldGoalsAttempted']) else 0,
+                    'fg3m': int(row['threePointersMade']) if pd.notna(row['threePointersMade']) else 0,
+                    'fg3a': int(row['threePointersAttempted']) if pd.notna(row['threePointersAttempted']) else 0,
+                    'to': int(row['turnovers']) if pd.notna(row['turnovers']) else 0,
+                    'is_starter': False,
+                })
+
+            # Сортируем стартеров по позиции (G -> F -> C) и затем по имени
             position_order = {'G': 0, 'F': 1, 'C': 2}
             starters_stats.sort(key=lambda x: (position_order.get(x['position'], 9), x['name']))
 
@@ -459,7 +492,9 @@ def get_team_last_n_games_stats(team_abbrev: str, n_games: int = 3, season: str 
                 'matchup': matchup,
                 'result': result,
                 'team_pts': team_pts,
-                'starters': starters_stats
+                'starters': starters_stats,
+                'bench': bench_stats,  # Добавляем статистику скамейки
+                'all_players': starters_stats + bench_stats,  # Все игроки
             })
 
         return {
