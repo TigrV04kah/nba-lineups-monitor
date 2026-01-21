@@ -1404,7 +1404,7 @@ class LineupsGUI:
 
             # Загружаем с API
             print(f"Загрузка статистики {team_abbrev} с API...")
-            data = get_team_last_n_games_stats(team_abbrev, n_games=5, season='2025-26')
+            data = get_team_last_n_games_stats(team_abbrev, n_games=10, season='2025-26')
 
             if data:
                 # Добавляем метку времени и сохраняем в кэш
@@ -1476,7 +1476,7 @@ class LineupsGUI:
                     # Загружаем с API
                     in_cache = team_abbrev in self.team_stats_cache
                     print(f"  {team_abbrev}: загрузка... ({cached + loaded}/{total}) [в кэше: {in_cache}]")
-                    data = get_team_last_n_games_stats(team_abbrev, n_games=5, season='2025-26')
+                    data = get_team_last_n_games_stats(team_abbrev, n_games=10, season='2025-26')
 
                     if data:
                         data['cached_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1953,7 +1953,7 @@ class LineupsGUI:
             # Если нет в кеше - загружаем
             messagebox.showinfo("Загрузка данных",
                               f"Загружаю статистику {team_abbrev}...\nПожалуйста, подождите.")
-            team_stats = get_team_last_n_games_stats(team_abbrev, n_games=5)
+            team_stats = get_team_last_n_games_stats(team_abbrev, n_games=10)
             team_games = team_stats.get('games', [])
             self.team_stats_cache[team_abbrev] = {'games': team_games}
 
