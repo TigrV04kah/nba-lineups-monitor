@@ -655,31 +655,18 @@ class LineupsGUI:
         # Добавляем обработчик клика на имя игрока для AI анализа
         player_data = player.copy()
 
-        # Используем методы класса с явным сохранением ссылок
-        def on_click(event):
-            print(f"[CLICK] {name}")
-            self._on_player_click(player_data)
+        # Сохраняем данные прямо в виджете
+        name_label.player_data = player_data
+        name_label.original_color = name_color
 
-        def on_enter(event):
-            print(f"[ENTER] {name}")
-            name_label.config(fg='#4fc3f7')
+        # Привязываем события через методы класса
+        name_label.bind('<Button-1>', self._handle_player_label_click)
+        name_label.bind('<Enter>', self._handle_player_label_enter)
+        name_label.bind('<Leave>', self._handle_player_label_leave)
 
-        def on_leave(event):
-            name_label.config(fg=name_color)
-
-        # Привязываем события
-        name_label.bind('<Button-1>', on_click)
-        name_label.bind('<Enter>', on_enter)
-        name_label.bind('<Leave>', on_leave)
-
-        # Сохраняем ссылки чтобы GC не удалил
-        self._click_handlers.append({
-            'label': name_label,
-            'click': on_click,
-            'enter': on_enter,
-            'leave': on_leave,
-            'data': player_data
-        })
+        # Сохраняем ссылку на label
+        self._click_handlers.append(name_label)
+        print(f"[BIND OK] {name} - handlers count: {len(self._click_handlers)}")
 
         # Статус (если не active)
         if status != 'active':
@@ -1972,6 +1959,23 @@ class LineupsGUI:
 
         # Вызываем основную функцию анализа
         self._on_player_click(player_name, player_position, team_abbrev, team_games, opponent_abbrev, is_home, team_injuries)
+
+    def _handle_player_label_click(self, event):
+        """Обработчик клика на label игрока."""
+        widget = event.widget
+        print(f"[CLICK] {widget.player_data.get('name', '?')}")
+        self._on_player_click(widget.player_data)
+
+    def _handle_player_label_enter(self, event):
+        """Обработчик наведения на label игрока."""
+        widget = event.widget
+        print(f"[ENTER] {widget.player_data.get('name', '?')}")
+        widget.config(fg='#4fc3f7')
+
+    def _handle_player_label_leave(self, event):
+        """Обработчик ухода мыши с label игрока."""
+        widget = event.widget
+        widget.config(fg=widget.original_color)
 
     def _on_player_click(self, *args):
         """Обработка клика на имени игрока - запуск AI анализа.
