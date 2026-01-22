@@ -42,6 +42,31 @@ def get_last_name(full_name):
         return parts[-1].lower()
     return name.lower()
 
+def get_first_letter(full_name):
+    """Извлечение первой буквы имени."""
+    if not full_name:
+        return ""
+    name = full_name.strip()
+    if name:
+        return name[0].upper()
+    return ""
+
+def names_match(name1, name2):
+    """
+    Сравнение имён игроков: фамилия + первая буква имени.
+    'S. Gilgeous-Alexander' vs 'Shai Gilgeous-Alexander' -> True
+    'D. Mitchell' vs 'Donovan Mitchell' -> True
+    """
+    if not name1 or not name2:
+        return False
+    last1 = get_last_name(name1)
+    last2 = get_last_name(name2)
+    if last1 != last2:
+        return False
+    first1 = get_first_letter(name1)
+    first2 = get_first_letter(name2)
+    return first1 == first2
+
 def normalize_name(name):
     """Нормализация имени для сравнения (D. Booker -> booker)."""
     if not name:
@@ -2120,8 +2145,8 @@ class LineupsGUI:
             # Check all players (starters + bench) - use all_players field
             all_players = game.get('all_players', game.get('starters', []))
             for player in all_players:
-                # Compare by last name (RotoWire uses "S. Gilgeous-Alexander", NBA API uses "Shai Gilgeous-Alexander")
-                if get_last_name(player['name']) == get_last_name(player_name):
+                # Compare by last name + first letter (handles "S. Gilgeous-Alexander" vs "Shai Gilgeous-Alexander")
+                if names_match(player['name'], player_name):
                     player_stats.append({
                         'matchup': game.get('matchup', 'N/A'),
                         'date': game.get('date', ''),
