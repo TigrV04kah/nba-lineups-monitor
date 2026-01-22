@@ -505,12 +505,12 @@ class LineupsGUI:
     def _fetch_data(self):
         """Получение данных с сайта."""
         try:
-            if self.selected_date == "tomorrow" and self.rotowire_auth_available:
-                # Используем авторизованный парсинг для завтрашних игр
-                print(f"Загрузка лайнапов на завтра (авторизованный режим)...")
-                self.games = fetch_lineups_with_auth("tomorrow")
+            if self.rotowire_auth_available:
+                # Используем авторизованный парсинг (работает и для today и для tomorrow)
+                print(f"Загрузка лайнапов на {self.selected_date} (авторизованный режим)...")
+                self.games = fetch_lineups_with_auth(self.selected_date)
             else:
-                # Стандартный парсинг для сегодняшних игр
+                # Стандартный парсинг (без Playwright)
                 url = ROTOWIRE_URL
                 if self.selected_date == "tomorrow":
                     url = f"{ROTOWIRE_URL}?date=tomorrow"

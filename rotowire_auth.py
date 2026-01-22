@@ -259,6 +259,16 @@ class RotoWireAuthScraper:
             url = get_rotowire_url(date)
             print(f"[INFO] Loading {url}...")
 
+            # Check if page is still valid, reinitialize if needed
+            try:
+                # Try a simple operation to check page is alive
+                self.page.url
+            except Exception:
+                print("[INFO] Reinitializing browser...")
+                self.close()
+                if not self.init_browser(headless=True):
+                    return ""
+
             self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
             # Wait for lineups to load
@@ -268,6 +278,16 @@ class RotoWireAuthScraper:
 
         except Exception as e:
             print(f"[ERROR] Page load error: {e}")
+            # Try to reinitialize and retry once
+            print("[INFO] Attempting recovery...")
+            try:
+                self.close()
+                if self.init_browser(headless=True):
+                    self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    self.page.wait_for_selector('.lineup.is-nba', timeout=15000)
+                    return self.page.content()
+            except Exception as e2:
+                print(f"[ERROR] Recovery failed: {e2}")
             return ""
 
     def parse_lineups_from_html(self, html: str) -> list:
