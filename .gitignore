@@ -34,3 +34,9 @@ openaikey.txt
 # Database
 *.db
 news.db
+
+# Browser session data (Playwright)
+browser_data/
+
+# Windows temp
+nul

@@ -21,6 +21,16 @@ except ImportError:
 USER_DATA_DIR = Path(__file__).parent / "browser_data"
 ROTOWIRE_BASE_URL = "https://www.rotowire.com/basketball/nba-lineups.php"
 
+# Путь к профилю Chrome пользователя (для авторизации через Google)
+def get_chrome_user_data_dir():
+    """Получение пути к профилю Chrome пользователя."""
+    import os
+    # Стандартный путь для Windows
+    chrome_path = Path(os.environ.get('LOCALAPPDATA', '')) / "Google" / "Chrome" / "User Data"
+    if chrome_path.exists():
+        return str(chrome_path)
+    return None
+
 
 def check_playwright_installed() -> bool:
     """Проверка установлен ли Playwright."""
@@ -66,7 +76,7 @@ class RotoWireAuthScraper:
             True если успешно
         """
         if not PLAYWRIGHT_AVAILABLE:
-            print("[ERROR] Playwright не установлен. Выполните:")
+            print("[ERROR] Playwright not installed. Run:")
             print("  pip install playwright")
             print("  playwright install chromium")
             return False
@@ -92,11 +102,11 @@ class RotoWireAuthScraper:
                 self.page = self.context.new_page()
 
             self._is_initialized = True
-            print("[OK] Браузер инициализирован")
+            print("[OK] Browser initialized")
             return True
 
         except Exception as e:
-            print(f"[ERROR] Ошибка инициализации браузера: {e}")
+            print(f"[ERROR] Browser init error: {e}")
             return False
 
     def close(self):
@@ -106,64 +116,67 @@ class RotoWireAuthScraper:
         if self.playwright:
             self.playwright.stop()
         self._is_initialized = False
-        print("[OK] Браузер закрыт")
+        print("[OK] Browser closed")
 
     def is_logged_in(self) -> bool:
         """
-        Проверка авторизован ли пользователь на RotoWire.
+        Check if user is logged in to RotoWire.
 
         Returns:
-            True если авторизован
+            True if logged in
         """
         if not self._is_initialized:
             return False
 
         try:
-            # Переходим на страницу RotoWire
-            self.page.goto(ROTOWIRE_BASE_URL, wait_until="networkidle", timeout=30000)
+            # Navigate to RotoWire page (use domcontentloaded - more reliable than networkidle)
+            self.page.goto(ROTOWIRE_BASE_URL, wait_until="domcontentloaded", timeout=30000)
 
-            # Проверяем наличие элементов авторизованного пользователя
-            # На RotoWire обычно есть кнопка "Log Out" или имя пользователя
+            # Wait a bit for dynamic content
+            self.page.wait_for_timeout(2000)
 
-            # Проверяем есть ли кнопка Login (значит не авторизован)
+            # Check for Login button (means NOT logged in)
             login_btn = self.page.query_selector('a[href*="login"], .login-btn, [data-login]')
             if login_btn and login_btn.is_visible():
-                # Проверяем текст кнопки
                 text = login_btn.inner_text().lower()
                 if 'log in' in text or 'login' in text or 'sign in' in text:
                     return False
 
-            # Проверяем есть ли элементы авторизованного пользователя
+            # Check for logout elements (means logged in)
             logout_btn = self.page.query_selector('a[href*="logout"], .logout-btn, [data-logout]')
             if logout_btn:
                 return True
 
-            # Дополнительная проверка - пробуем загрузить завтрашние данные
-            self.page.goto(get_rotowire_url("tomorrow"), wait_until="networkidle", timeout=30000)
+            # Additional check - try to load tomorrow's data
+            self.page.goto(get_rotowire_url("tomorrow"), wait_until="domcontentloaded", timeout=30000)
+            self.page.wait_for_timeout(2000)
 
-            # Если есть paywall или требование подписки - не авторизован
+            # If paywall exists - not logged in
             paywall = self.page.query_selector('.paywall, .subscription-required, .premium-content')
             if paywall and paywall.is_visible():
                 return False
 
-            # Проверяем есть ли лайнапы на завтра
+            # Check if there are lineups for tomorrow
             lineups = self.page.query_selector_all('.lineup.is-nba')
             return len(lineups) > 0
 
         except Exception as e:
-            print(f"[ERROR] Ошибка проверки авторизации: {e}")
+            print(f"[ERROR] Auth check error: {e}")
             return False
 
-    def login_interactive(self) -> bool:
+    def login_interactive(self, use_real_chrome: bool = True) -> bool:
         """
         Интерактивная авторизация - открывает браузер для ручного входа.
-        Пользователь должен авторизоваться через Google вручную.
+
+        Args:
+            use_real_chrome: использовать реальный Chrome с профилем пользователя
+                            (обходит блокировку Google OAuth)
 
         Returns:
             True если авторизация успешна
         """
         if not PLAYWRIGHT_AVAILABLE:
-            print("[ERROR] Playwright не установлен")
+            print("[ERROR] Playwright not installed")
             return False
 
         try:
@@ -171,34 +184,35 @@ class RotoWireAuthScraper:
             if self.context:
                 self.close()
 
-            # Запускаем браузер в видимом режиме для авторизации
             print("\n" + "="*60)
-            print("АВТОРИЗАЦИЯ НА ROTOWIRE")
+            print("ROTOWIRE LOGIN")
             print("="*60)
-            print("1. Откроется окно браузера")
-            print("2. Авторизуйтесь через Google на сайте RotoWire")
-            print("3. После успешного входа закройте браузер")
-            print("="*60 + "\n")
 
-            USER_DATA_DIR.mkdir(exist_ok=True)
+            chrome_user_data = get_chrome_user_data_dir()
+
+            print("1. Browser will open")
+            print("2. Login to RotoWire via Google")
+            print("3. Close browser after login")
+            print("="*60 + "\n")
 
             self.playwright = sync_playwright().start()
 
-            # Запускаем в видимом режиме
+            # Используем отдельный профиль но с реальным Chrome (обходит блокировку Google)
+            USER_DATA_DIR.mkdir(exist_ok=True)
             self.context = self.playwright.chromium.launch_persistent_context(
                 user_data_dir=str(USER_DATA_DIR),
-                headless=False,  # Видимый режим!
+                channel="chrome",  # Реальный Chrome вместо Chromium
+                headless=False,
                 viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
             self.page = self.context.new_page()
 
-            # Переходим на страницу входа RotoWire
-            self.page.goto("https://www.rotowire.com/users/login.php", wait_until="networkidle")
+            # Navigate to RotoWire login page
+            self.page.goto("https://www.rotowire.com/users/login.php", wait_until="domcontentloaded")
 
-            print("[INFO] Авторизуйтесь в открывшемся окне браузера...")
-            print("[INFO] После входа закройте браузер для продолжения")
+            print("[INFO] Login in the browser window...")
+            print("[INFO] Close browser after login to continue")
 
             # Ждём пока пользователь закроет браузер
             try:
@@ -215,27 +229,27 @@ class RotoWireAuthScraper:
             if self.init_browser(headless=True):
                 # Проверяем успешность авторизации
                 if self.is_logged_in():
-                    print("[OK] Авторизация успешна! Сессия сохранена.")
+                    print("[OK] Login successful! Session saved.")
                     return True
                 else:
-                    print("[WARNING] Авторизация не подтверждена. Попробуйте ещё раз.")
+                    print("[WARNING] Login not confirmed. Try again.")
                     return False
 
             return False
 
         except Exception as e:
-            print(f"[ERROR] Ошибка авторизации: {e}")
+            print(f"[ERROR] Login error: {e}")
             return False
 
     def fetch_page_content(self, date: str = "today") -> str:
         """
-        Загрузка HTML контента страницы с лайнапами.
+        Load HTML content of lineups page.
 
         Args:
-            date: "today" или "tomorrow"
+            date: "today" or "tomorrow"
 
         Returns:
-            HTML контент страницы
+            HTML content of the page
         """
         if not self._is_initialized:
             if not self.init_browser(headless=True):
@@ -243,17 +257,17 @@ class RotoWireAuthScraper:
 
         try:
             url = get_rotowire_url(date)
-            print(f"[INFO] Загрузка {url}...")
+            print(f"[INFO] Loading {url}...")
 
-            self.page.goto(url, wait_until="networkidle", timeout=30000)
+            self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            # Ждём загрузки лайнапов
-            self.page.wait_for_selector('.lineup.is-nba', timeout=10000)
+            # Wait for lineups to load
+            self.page.wait_for_selector('.lineup.is-nba', timeout=15000)
 
             return self.page.content()
 
         except Exception as e:
-            print(f"[ERROR] Ошибка загрузки страницы: {e}")
+            print(f"[ERROR] Page load error: {e}")
             return ""
 
     def parse_lineups_from_html(self, html: str) -> list:
@@ -293,31 +307,76 @@ class RotoWireAuthScraper:
         return games
 
     def _parse_game_container(self, container) -> dict:
-        """Парсинг одного контейнера игры."""
+        """Parse a single game container."""
         game = {
             'game_time': '',
             'away_team': {'abbrev': '', 'record': '', 'lineup': [], 'injuries': []},
             'home_team': {'abbrev': '', 'record': '', 'lineup': [], 'injuries': []}
         }
 
-        # Время игры
+        # Game time
         time_elem = container.find(class_='lineup__time')
         if time_elem:
             game['game_time'] = time_elem.get_text(strip=True)
 
-        # Находим блоки команд
-        team_boxes = container.find_all(class_='lineup__box')
+        # Find team elements - new structure uses is-visit and is-home classes
+        visit_team = container.find(class_='is-visit')
+        home_team = container.find(class_='is-home')
 
-        if len(team_boxes) >= 2:
-            # Away team (первый блок)
-            game['away_team'] = self._parse_team_box(team_boxes[0])
-            # Home team (второй блок)
-            game['home_team'] = self._parse_team_box(team_boxes[1])
+        # Get team abbreviations
+        if visit_team:
+            abbr = visit_team.find(class_='lineup__abbr')
+            if abbr:
+                game['away_team']['abbrev'] = abbr.get_text(strip=True)
+
+        if home_team:
+            abbr = home_team.find(class_='lineup__abbr')
+            if abbr:
+                game['home_team']['abbrev'] = abbr.get_text(strip=True)
+
+        # Get team records from matchup section
+        matchup = container.find(class_='lineup__matchup')
+        if matchup:
+            visit_record = matchup.find(class_='is-visit')
+            home_record = matchup.find(class_='is-home')
+            if visit_record:
+                text = visit_record.get_text(strip=True)
+                # Extract record from text like "Cavaliers(25-20)"
+                if '(' in text and ')' in text:
+                    game['away_team']['record'] = text[text.find('(')+1:text.find(')')]
+            if home_record:
+                text = home_record.get_text(strip=True)
+                if '(' in text and ')' in text:
+                    game['home_team']['record'] = text[text.find('(')+1:text.find(')')]
+
+        # Find player lists - typically 2 lists (away, home)
+        player_lists = container.find_all('ul', class_='lineup__list')
+        if len(player_lists) >= 2:
+            game['away_team']['lineup'] = self._parse_player_list(player_lists[0])
+            game['home_team']['lineup'] = self._parse_player_list(player_lists[1])
+
+            # Update injuries
+            for player in game['away_team']['lineup']:
+                if player.get('status') in ['out', 'doubtful']:
+                    game['away_team']['injuries'].append(player['name'])
+            for player in game['home_team']['lineup']:
+                if player.get('status') in ['out', 'doubtful']:
+                    game['home_team']['injuries'].append(player['name'])
 
         return game
 
+    def _parse_player_list(self, player_list) -> list:
+        """Parse a player list element."""
+        players = []
+        items = player_list.find_all('li')
+        for item in items:
+            player = self._parse_player_item(item)
+            if player:
+                players.append(player)
+        return players
+
     def _parse_team_box(self, box) -> dict:
-        """Парсинг блока одной команды."""
+        """Parse a single team box (legacy method for compatibility)."""
         team = {
             'abbrev': '',
             'record': '',
@@ -325,23 +384,19 @@ class RotoWireAuthScraper:
             'injuries': []
         }
 
-        # Аббревиатура команды
         abbrev_elem = box.find(class_='lineup__abbr')
         if abbrev_elem:
             team['abbrev'] = abbrev_elem.get_text(strip=True)
 
-        # Рекорд команды
         record_elem = box.find(class_='lineup__record')
         if record_elem:
             team['record'] = record_elem.get_text(strip=True)
 
-        # Игроки
         player_items = box.find_all('li')
         for item in player_items:
             player = self._parse_player_item(item)
             if player:
                 team['lineup'].append(player)
-                # Если игрок OUT или DOUBTFUL - добавляем в injuries
                 if player.get('status') in ['out', 'doubtful']:
                     team['injuries'].append(player['name'])
 
@@ -449,8 +504,8 @@ if __name__ == "__main__":
     print("="*40)
 
     if not PLAYWRIGHT_AVAILABLE:
-        print("\n[ERROR] Playwright не установлен!")
-        print("\nДля установки выполните:")
+        print("\n[ERROR] Playwright not installed!")
+        print("\nTo install run:")
         print("  pip install playwright")
         print("  playwright install chromium")
         sys.exit(1)
@@ -459,41 +514,37 @@ if __name__ == "__main__":
         command = sys.argv[1]
 
         if command == "login":
-            # Запуск авторизации
             run_login()
 
         elif command == "check":
-            # Проверка авторизации
             if check_auth_status():
-                print("[OK] Авторизован на RotoWire")
+                print("[OK] Logged in to RotoWire")
             else:
-                print("[NO] Не авторизован. Запустите: python rotowire_auth.py login")
+                print("[NO] Not logged in. Run: python rotowire_auth.py login")
 
         elif command == "today":
-            # Парсинг на сегодня
             games = fetch_lineups_with_auth("today")
-            print(f"\nНайдено игр на сегодня: {len(games)}")
+            print(f"\nFound {len(games)} games today")
             for g in games:
                 print(f"  {g['away_team']['abbrev']} @ {g['home_team']['abbrev']} - {g['game_time']}")
 
         elif command == "tomorrow":
-            # Парсинг на завтра
             games = fetch_lineups_with_auth("tomorrow")
-            print(f"\nНайдено игр на завтра: {len(games)}")
+            print(f"\nFound {len(games)} games tomorrow")
             for g in games:
                 print(f"  {g['away_team']['abbrev']} @ {g['home_team']['abbrev']} - {g['game_time']}")
 
         else:
-            print(f"Неизвестная команда: {command}")
-            print("\nДоступные команды:")
-            print("  login    - авторизация на RotoWire")
-            print("  check    - проверка статуса авторизации")
-            print("  today    - показать лайнапы на сегодня")
-            print("  tomorrow - показать лайнапы на завтра")
+            print(f"Unknown command: {command}")
+            print("\nAvailable commands:")
+            print("  login    - login to RotoWire")
+            print("  check    - check auth status")
+            print("  today    - show today's lineups")
+            print("  tomorrow - show tomorrow's lineups")
 
     else:
-        print("\nИспользование:")
-        print("  python rotowire_auth.py login    - авторизация")
-        print("  python rotowire_auth.py check    - проверка авторизации")
-        print("  python rotowire_auth.py today    - лайнапы на сегодня")
-        print("  python rotowire_auth.py tomorrow - лайнапы на завтра")
+        print("\nUsage:")
+        print("  python rotowire_auth.py login    - login")
+        print("  python rotowire_auth.py check    - check auth")
+        print("  python rotowire_auth.py today    - today's lineups")
+        print("  python rotowire_auth.py tomorrow - tomorrow's lineups")
