@@ -16,6 +16,16 @@ from nba_lineups_scraper import (
     get_team_last_n_games_stats
 )
 from ai_analyzer import analyze_lineup_changes, analyze_player_projection, init_openai
+
+# Импорт авторизованного парсера (опционально)
+try:
+    from rotowire_auth import (
+        check_playwright_installed, fetch_lineups_with_auth,
+        run_login, check_auth_status, get_scraper
+    )
+    ROTOWIRE_AUTH_AVAILABLE = True
+except ImportError:
+    ROTOWIRE_AUTH_AVAILABLE = False
 from news_scraper import get_news_by_team, get_news_for_matchup, get_latest_news, scrape_news, init_database
 from team_mapping import get_team_name
 import webbrowser
@@ -136,6 +146,8 @@ class LineupsGUI:
         self.team_stats_cache = {}  # Кэш статистики последних 3 игр команд
         self.cache_is_stale = False  # Флаг устаревшего кэша
         self.ai_enabled = False  # AI анализ
+        self.selected_date = "today"  # Выбранная дата: "today" или "tomorrow"
+        self.rotowire_auth_available = ROTOWIRE_AUTH_AVAILABLE and check_playwright_installed() if ROTOWIRE_AUTH_AVAILABLE else False
 
         # Инициализируем AI
         self.ai_enabled = init_openai()
@@ -181,6 +193,33 @@ class LineupsGUI:
         title = tk.Label(header_frame, text="NBA LINEUPS", font=title_font,
                         fg='#e94560', bg='#16213e')
         title.pack(side='left', padx=20, pady=15)
+
+        # Переключатель дат Today/Tomorrow
+        date_frame = tk.Frame(header_frame, bg='#16213e')
+        date_frame.pack(side='left', padx=10, pady=15)
+
+        self.today_btn = tk.Button(date_frame, text="Today",
+                                   command=lambda: self.switch_date("today"),
+                                   bg='#e94560', fg='white',
+                                   font=('Arial', 10, 'bold'),
+                                   relief='flat', padx=12, pady=3)
+        self.today_btn.pack(side='left', padx=2)
+
+        self.tomorrow_btn = tk.Button(date_frame, text="Tomorrow",
+                                      command=lambda: self.switch_date("tomorrow"),
+                                      bg='#0f3460', fg='white',
+                                      font=('Arial', 10, 'bold'),
+                                      relief='flat', padx=12, pady=3)
+        self.tomorrow_btn.pack(side='left', padx=2)
+
+        # Кнопка RotoWire Login (если доступен Playwright)
+        if self.rotowire_auth_available:
+            self.login_btn = tk.Button(date_frame, text="🔑",
+                                       command=self.rotowire_login,
+                                       bg='#2ecc71', fg='white',
+                                       font=('Arial', 10),
+                                       relief='flat', padx=5, pady=3)
+            self.login_btn.pack(side='left', padx=5)
 
         # Кнопка обновления
         self.refresh_btn = tk.Button(header_frame, text="Refresh",
@@ -466,8 +505,21 @@ class LineupsGUI:
     def _fetch_data(self):
         """Получение данных с сайта."""
         try:
-            soup = fetch_page(ROTOWIRE_URL)
-            self.games = parse_lineups(soup)
+            if self.selected_date == "tomorrow" and self.rotowire_auth_available:
+                # Используем авторизованный парсинг для завтрашних игр
+                print(f"Загрузка лайнапов на завтра (авторизованный режим)...")
+                self.games = fetch_lineups_with_auth("tomorrow")
+            else:
+                # Стандартный парсинг для сегодняшних игр
+                url = ROTOWIRE_URL
+                if self.selected_date == "tomorrow":
+                    url = f"{ROTOWIRE_URL}?date=tomorrow"
+                    print(f"Загрузка лайнапов на завтра (без авторизации - могут быть ограничения)...")
+                else:
+                    print(f"Загрузка лайнапов на сегодня...")
+
+                soup = fetch_page(url)
+                self.games = parse_lineups(soup)
 
             # Помечаем кэш как свежий и сохраняем
             self.cache_is_stale = False
@@ -485,8 +537,9 @@ class LineupsGUI:
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
 
+        date_text = "today" if self.selected_date == "today" else "tomorrow"
         if not self.games:
-            no_games = tk.Label(self.scrollable_frame, text="No games today",
+            no_games = tk.Label(self.scrollable_frame, text=f"No games {date_text}",
                                font=('Arial', 16), fg='#a0a0a0', bg='#1a1a2e')
             no_games.pack(pady=50)
         else:
@@ -494,7 +547,7 @@ class LineupsGUI:
             for i, game in enumerate(self.games):
                 self.create_game_card(game, i)
 
-        self.status_label.config(text=f"{len(self.games)} games today")
+        self.status_label.config(text=f"{len(self.games)} games {date_text}")
         self.refresh_btn.config(state='normal')
 
         # Предзагружаем статистику всех команд в фоне
@@ -675,6 +728,64 @@ class LineupsGUI:
             status_label = tk.Label(row, text=status_text, font=('Arial', 8, 'bold'),
                                    fg=status_color, bg='#1a1a2e')
             status_label.pack(side='right', padx=5)
+
+    def switch_date(self, date: str):
+        """Переключение между Today и Tomorrow."""
+        if date == self.selected_date:
+            return
+
+        self.selected_date = date
+
+        # Обновляем стили кнопок
+        if date == "today":
+            self.today_btn.config(bg='#e94560')
+            self.tomorrow_btn.config(bg='#0f3460')
+            self.root.title("NBA Lineups - Today's Games")
+        else:
+            self.today_btn.config(bg='#0f3460')
+            self.tomorrow_btn.config(bg='#e94560')
+            self.root.title("NBA Lineups - Tomorrow's Games")
+
+        # Загружаем данные для новой даты
+        self.cache_is_stale = True  # Принудительно обновляем
+        self.load_data()
+
+    def rotowire_login(self):
+        """Запуск интерактивной авторизации на RotoWire."""
+        if not self.rotowire_auth_available:
+            messagebox.showwarning("Недоступно",
+                "Playwright не установлен.\n\n"
+                "Для установки выполните:\n"
+                "pip install playwright\n"
+                "playwright install chromium")
+            return
+
+        # Показываем инструкцию
+        result = messagebox.askyesno("RotoWire Login",
+            "Откроется окно браузера для авторизации на RotoWire.\n\n"
+            "1. Авторизуйтесь через Google\n"
+            "2. После успешного входа закройте браузер\n\n"
+            "Продолжить?")
+
+        if not result:
+            return
+
+        # Запускаем авторизацию в отдельном потоке
+        def do_login():
+            success = run_login()
+            self.root.after(0, lambda: self._on_login_complete(success))
+
+        self.status_label.config(text="Авторизация на RotoWire...", fg='#ffd93d')
+        threading.Thread(target=do_login, daemon=True).start()
+
+    def _on_login_complete(self, success: bool):
+        """Callback после завершения авторизации."""
+        if success:
+            messagebox.showinfo("Успех", "Авторизация на RotoWire успешна!\n\nТеперь доступны лайнапы на завтра.")
+            self.status_label.config(text="RotoWire авторизован", fg='#2ecc71')
+        else:
+            messagebox.showwarning("Ошибка", "Авторизация не удалась.\nПопробуйте ещё раз.")
+            self.status_label.config(text="Ошибка авторизации", fg='#e94560')
 
     def refresh_data(self):
         """Обновление данных (принудительно, игнорируя кэш)."""

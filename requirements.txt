@@ -1,0 +1,22 @@
+# NBA Lineups Monitor - Dependencies
+
+# Web scraping
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+
+# GUI
+plyer>=2.0.0
+
+# AI Analysis
+openai>=1.0.0
+python-dotenv>=1.0.0
+
+# Data processing
+pandas>=1.5.0
+
+# NBA API (optional)
+nba_api>=1.2.0
+
+# Playwright for authenticated scraping (optional)
+# Install with: pip install playwright && playwright install chromium
+playwright>=1.40.0
