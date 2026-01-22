@@ -52,11 +52,32 @@ def get_first_letter(full_name):
         return name[0].upper()
     return ""
 
+# Фамилии где есть несколько игроков с одинаковой первой буквой имени
+# Для этих случаев нужно сравнивать полное имя
+AMBIGUOUS_SURNAMES = {
+    'curry': ['stephen', 'seth'],      # Stephen Curry vs Seth Curry
+    'morris': ['marcus', 'markieff'],  # Marcus Morris vs Markieff Morris
+    'martin': ['caleb', 'cody'],       # Caleb Martin vs Cody Martin
+    'holiday': ['jrue', 'justin', 'aaron'],  # Holiday brothers
+}
+
+def get_first_name(full_name):
+    """Извлечение имени (первого слова)."""
+    if not full_name:
+        return ""
+    parts = full_name.replace('.', '').strip().split()
+    if parts:
+        return parts[0].lower()
+    return ""
+
 def names_match(name1, name2):
     """
     Сравнение имён игроков: фамилия + первая буква имени.
     'S. Gilgeous-Alexander' vs 'Shai Gilgeous-Alexander' -> True
     'D. Mitchell' vs 'Donovan Mitchell' -> True
+
+    Исключение: для игроков с одинаковой фамилией и первой буквой (Curry, Morris, Martin)
+    сравниваем полные имена.
     """
     if not name1 or not name2:
         return False
@@ -64,6 +85,25 @@ def names_match(name1, name2):
     last2 = get_last_name(name2)
     if last1 != last2:
         return False
+
+    # Проверяем проблемные фамилии (братья с одинаковой первой буквой)
+    if last1 in AMBIGUOUS_SURNAMES:
+        first1 = get_first_name(name1)
+        first2 = get_first_name(name2)
+        # Если хотя бы одно имя полное (не сокращение) - сравниваем полные имена
+        # "Stephen Curry" vs "Seth Curry" -> сравниваем stephen != seth -> False
+        # "Stephen Curry" vs "S. Curry" -> stephen vs s -> первые буквы совпадают -> проверяем полное
+        # "S. Curry" vs "Seth Curry" -> s vs seth -> первые буквы совпадают -> проверяем полное
+        if len(first1) > 1 or len(first2) > 1:
+            # Хотя бы одно полное имя - сравниваем полностью
+            if len(first1) > 1 and len(first2) > 1:
+                return first1 == first2
+            # Одно полное, одно сокращение - проверяем начинается ли полное с сокращения
+            if len(first1) > 1:
+                return first1.startswith(first2)
+            else:
+                return first2.startswith(first1)
+
     first1 = get_first_letter(name1)
     first2 = get_first_letter(name2)
     return first1 == first2
@@ -2131,8 +2171,65 @@ class LineupsGUI:
             team_games = team_stats.get('games', [])
             self.team_stats_cache[team_abbrev] = {'games': team_games}
 
+        # Собираем статистику для каждого OUT игрока (среднее за последние 5 игр где он играл)
+        injuries_with_stats = []
+        for injured_name in team_injuries:
+            injured_stats = self._get_player_avg_stats(injured_name, team_games, n_games=5)
+            injuries_with_stats.append(injured_stats)
+
         # Вызываем основную функцию анализа
-        self._on_player_click(player_name, player_position, team_abbrev, team_games, opponent_abbrev, is_home, team_injuries)
+        self._on_player_click(player_name, player_position, team_abbrev, team_games, opponent_abbrev, is_home, injuries_with_stats)
+
+    def _get_player_avg_stats(self, player_name: str, team_games: list, n_games: int = 5) -> dict:
+        """
+        Получить среднюю статистику игрока за последние N игр где он играл.
+
+        Returns:
+            dict: {name, avg_pts, avg_min, games_played}
+        """
+        player_games = []
+
+        for game in team_games:
+            all_players = game.get('all_players', game.get('starters', []))
+            for player in all_players:
+                if names_match(player.get('name', ''), player_name):
+                    # Парсим минуты
+                    mins_raw = player.get('min', 0)
+                    if isinstance(mins_raw, str) and ':' in mins_raw:
+                        try:
+                            parts = mins_raw.split(':')
+                            mins = int(parts[0]) + int(parts[1]) / 60
+                        except:
+                            mins = 0
+                    else:
+                        mins = float(mins_raw) if mins_raw else 0
+
+                    player_games.append({
+                        'pts': player.get('pts', 0),
+                        'min': mins
+                    })
+                    break
+
+            # Достаточно N игр
+            if len(player_games) >= n_games:
+                break
+
+        if player_games:
+            avg_pts = sum(g['pts'] for g in player_games) / len(player_games)
+            avg_min = sum(g['min'] for g in player_games) / len(player_games)
+            return {
+                'name': player_name,
+                'avg_pts': round(avg_pts, 1),
+                'avg_min': round(avg_min, 1),
+                'games_played': len(player_games)
+            }
+        else:
+            return {
+                'name': player_name,
+                'avg_pts': 0,
+                'avg_min': 0,
+                'games_played': 0
+            }
 
     def _handle_player_label_click(self, event):
         """Обработчик клика на label игрока."""
@@ -2191,6 +2288,7 @@ class LineupsGUI:
                         'stl': player.get('stl', 0),
                         'blk': player.get('blk', 0),
                         'min': player.get('min', 0),  # Передаём как есть (строка "MM:SS"), парсинг в ai_analyzer
+                        'is_starter': player.get('is_starter', True),
                         'injured': False
                     })
                     player_found = True
@@ -2207,6 +2305,7 @@ class LineupsGUI:
                     'stl': 0,
                     'blk': 0,
                     'min': 0,
+                    'is_starter': True,
                     'injured': True  # Флаг травмы
                 })
 
@@ -2260,15 +2359,20 @@ class LineupsGUI:
                                     opponent_abbrev, opponent_stats, is_home, team_injuries=None, team_games=None):
         """Фоновый AI анализ игрока."""
         try:
-            # Извлекаем имена травмированных игроков
-            injuries_list = []
+            # team_injuries теперь содержит dict с статистикой {name, avg_pts, avg_min, games_played}
+            injuries_with_stats = []
             if team_injuries:
                 if isinstance(team_injuries, list):
                     for inj in team_injuries:
-                        if isinstance(inj, dict):
-                            injuries_list.append(inj.get('name', ''))
+                        if isinstance(inj, dict) and 'avg_pts' in inj:
+                            # Новый формат со статистикой
+                            injuries_with_stats.append(inj)
+                        elif isinstance(inj, dict):
+                            # Старый формат - только имя
+                            injuries_with_stats.append({'name': inj.get('name', ''), 'avg_pts': 0, 'avg_min': 0, 'games_played': 0})
                         else:
-                            injuries_list.append(str(inj))
+                            # Просто строка
+                            injuries_with_stats.append({'name': str(inj), 'avg_pts': 0, 'avg_min': 0, 'games_played': 0})
 
             result = analyze_player_projection(
                 player_name=player_name,
@@ -2278,7 +2382,7 @@ class LineupsGUI:
                 opponent_abbrev=opponent_abbrev or "N/A",
                 opponent_stats=opponent_stats,
                 is_home=is_home if is_home is not None else True,
-                team_injuries=[inj for inj in injuries_list if inj],
+                team_injuries=injuries_with_stats,
                 team_games=team_games
             )
 

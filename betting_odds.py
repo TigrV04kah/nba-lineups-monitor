@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 # Путь к файлу с коэффициентами (можно переопределить)
-DEFAULT_ODDS_FILE = r"D:\scripts\nba_players"
+DEFAULT_ODDS_FILE = r"D:\nba-lineups-monitor\line stats\nba_players.csv"
 
 
 @dataclass
@@ -314,6 +314,26 @@ RUSSIAN_TO_ENGLISH_PLAYERS = {
     "Лонни Уокер": "Lonnie Walker IV",
     "Кевин Лав": "Kevin Love",
     "Джеремайя Робинсон-Эрл": "Jeremiah Robinson-Earl",
+
+    # Новички и роль-плееры 2025-26
+    "Матас Бузелис": "Matas Buzelis",
+    "Вальдес Эджкомб мл.": "VJ Edgecombe",
+    "Джален Рашид Смит": "Jalen Smith",
+    "Тре Джонсон": "Tre Johnson",
+    "Рид Шеппард": "Reed Sheppard",
+    "Зейчер Рисашер": "Zaccharie Risacher",
+    "Алекс Сарр": "Alex Sarr",
+    "Роб Диллингэм": "Rob Dillingham",
+    "Никола Топич": "Nikola Topic",
+    "Джарел Уолкер": "Jarell Walker",
+    "Райан Данн": "Ryan Dunn",
+    "Ко Коко": "Ko Ko",
+    "Терренс Шеннон": "Terrence Shannon Jr.",
+    "Дьюс МакБрайд": "Deuce McBride",
+    "Трэйс Джексон-Дэвис": "Trayce Jackson-Davis",
+    "Куинтен Грайммс": "Quentin Grimes",
+    "Исаия Коллиер": "Isaiah Collier",
+    "Клей Уотсон": "Chet Watson",
 }
 
 # Обратный словарь
@@ -374,14 +394,18 @@ def load_odds_from_csv(file_path: str = DEFAULT_ODDS_FILE) -> Dict[str, List[Pla
 
             # Определяем тип статистики
             stat_type = None
-            if game_type == 'GoalPlayers' and 'total_player' in event_type:
-                stat_type = 'points'
-            elif game_type == 'Rebounds' and 'podbor' in event_type.lower():
-                stat_type = 'rebounds'
-            elif game_type == 'Pass' or 'peredacha' in event_type.lower():
-                stat_type = 'assists'
-            elif game_type == 'ScoreReboundsTransfer':
-                stat_type = 'pra'  # Points + Rebounds + Assists
+            event_lower = event_type.lower()
+
+            if game_type == 'ScoreReboundsTransfer' and 'total_other' in event_lower:
+                stat_type = 'pra'  # Points + Rebounds + Assists (очки+подборы+передачи)
+            elif 'peredacha' in event_lower or 'assist' in event_lower:
+                stat_type = 'assists'  # Передачи
+            elif 'points_rebounds' in event_lower or 'очки_подборы' in event_lower:
+                stat_type = 'pr'  # Points + Rebounds
+            elif 'podbor' in event_lower or 'rebound' in event_lower:
+                stat_type = 'rebounds'  # Подборы
+            elif game_type == 'GoalPlayers' and ('total_player' in event_lower or 'player_total' in event_lower):
+                stat_type = 'points'  # Очки
 
             if not stat_type:
                 continue
