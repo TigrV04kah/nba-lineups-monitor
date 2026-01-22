@@ -21,7 +21,7 @@ from ai_analyzer import analyze_lineup_changes, analyze_player_projection, init_
 try:
     from rotowire_auth import (
         check_playwright_installed, fetch_lineups_with_auth,
-        run_login, check_auth_status, get_scraper
+        run_login, check_auth_status
     )
     ROTOWIRE_AUTH_AVAILABLE = True
 except ImportError:
@@ -147,7 +147,8 @@ class LineupsGUI:
         self.cache_is_stale = False  # Флаг устаревшего кэша
         self.ai_enabled = False  # AI анализ
         self.selected_date = "today"  # Выбранная дата: "today" или "tomorrow"
-        self.rotowire_auth_available = ROTOWIRE_AUTH_AVAILABLE and check_playwright_installed() if ROTOWIRE_AUTH_AVAILABLE else False
+        # Check if auth cookies exist (Playwright only needed for login, not fetching)
+        self.rotowire_auth_available = ROTOWIRE_AUTH_AVAILABLE and check_auth_status() if ROTOWIRE_AUTH_AVAILABLE else False
 
         # Инициализируем AI
         self.ai_enabled = init_openai()
