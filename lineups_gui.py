@@ -2117,17 +2117,20 @@ class LineupsGUI:
         player_stats = []
         for game_idx, game in enumerate(games, 1):
             player_found = False
-            for starter in game.get('starters', []):
-                if starter['name'] == player_name:
+            # Check all players (starters + bench) - use all_players field
+            all_players = game.get('all_players', game.get('starters', []))
+            for player in all_players:
+                # Compare by last name (RotoWire uses "S. Gilgeous-Alexander", NBA API uses "Shai Gilgeous-Alexander")
+                if get_last_name(player['name']) == get_last_name(player_name):
                     player_stats.append({
                         'matchup': game.get('matchup', 'N/A'),
                         'date': game.get('date', ''),
-                        'pts': starter.get('pts', 0),
-                        'reb': starter.get('reb', 0),
-                        'ast': starter.get('ast', 0),
-                        'stl': starter.get('stl', 0),
-                        'blk': starter.get('blk', 0),
-                        'min': starter.get('min', 0),  # Передаём как есть (строка "MM:SS"), парсинг в ai_analyzer
+                        'pts': player.get('pts', 0),
+                        'reb': player.get('reb', 0),
+                        'ast': player.get('ast', 0),
+                        'stl': player.get('stl', 0),
+                        'blk': player.get('blk', 0),
+                        'min': player.get('min', 0),  # Передаём как есть (строка "MM:SS"), парсинг в ai_analyzer
                         'injured': False
                     })
                     player_found = True
