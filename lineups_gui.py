@@ -28,6 +28,7 @@ except ImportError:
     ROTOWIRE_AUTH_AVAILABLE = False
 from news_scraper import get_news_by_team, get_news_for_matchup, get_latest_news, scrape_news, init_database
 from team_mapping import get_team_name
+from injuries_history import save_injuries, get_injuries_stats
 import webbrowser
 
 def get_last_name(full_name):
@@ -551,10 +552,41 @@ class LineupsGUI:
             self.cache_is_stale = False
             self.save_cache()
 
+            # Сохраняем травмы в базу для исторического анализа
+            self._save_injuries_to_db()
+
             self.root.after(0, self._update_ui)
         except Exception as e:
             self.root.after(0, lambda: self.status_label.config(text=f"Error: {e}"))
             self.root.after(0, lambda: self.refresh_btn.config(state='normal'))
+
+    def _save_injuries_to_db(self):
+        """Сохранение травм в базу для исторического анализа."""
+        if not self.games:
+            return
+
+        from datetime import date
+        today = date.today().strftime('%Y-%m-%d')
+
+        for game in self.games:
+            # Away team injuries
+            away_team = game.get('away_team', {})
+            away_abbrev = away_team.get('abbrev', '')
+            away_lineup = away_team.get('lineup', [])
+
+            # Собираем только OUT игроков (status == 'out')
+            away_out = [p.get('name') for p in away_lineup if p.get('status') == 'out']
+            if away_out and away_abbrev:
+                save_injuries(away_abbrev, away_out, today)
+
+            # Home team injuries
+            home_team = game.get('home_team', {})
+            home_abbrev = home_team.get('abbrev', '')
+            home_lineup = home_team.get('lineup', [])
+
+            home_out = [p.get('name') for p in home_lineup if p.get('status') == 'out']
+            if home_out and home_abbrev:
+                save_injuries(home_abbrev, home_out, today)
 
     def _update_ui(self):
         """Обновление интерфейса с данными."""
@@ -819,6 +851,9 @@ class LineupsGUI:
         """Обновление данных (принудительно, игнорируя кэш)."""
         # Помечаем кэш как устаревший, чтобы загрузить свежие данные
         self.cache_is_stale = True
+        # Очищаем кэш статистики команд (чтобы загрузить свежие данные при клике на игрока)
+        self.team_stats_cache = {}
+        print("[INFO] Team stats cache cleared")
         self.load_data()
 
     def load_cache(self):

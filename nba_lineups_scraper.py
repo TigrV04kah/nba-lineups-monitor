@@ -488,6 +488,12 @@ def get_team_last_n_games_stats(team_abbrev: str, n_games: int = 3, season: str 
             position_order = {'G': 0, 'F': 1, 'C': 2}
             starters_stats.sort(key=lambda x: (position_order.get(x['position'], 9), x['name']))
 
+            # Пропускаем игры с неполными данными (игра в процессе или данные не загружены)
+            has_valid_stats = any(p.get('min') and p.get('min') != '' for p in starters_stats)
+            if not has_valid_stats:
+                print(f"  Пропуск игры {game_date} ({matchup}) - нет данных о минутах (игра в процессе?)")
+                continue
+
             games_data.append({
                 'game_id': game_id,
                 'date': game_date,
